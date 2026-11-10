@@ -37,7 +37,7 @@ Llama manages a `llama serve` process and talks to it over its REST API. Your mo
 Llama sends no telemetry — no events, no analytics, no install id. The only thing outbound HTTP requests (model downloads, release-update checks, and calls to the local llama-server) carry is the standard User-Agent header:
 
 ```
-llama-win/0.12.0 (10.0.26100; x64)
+llama-win/0.16.0 (10.0.26100; x64)
 ```
 
 — the app version, the Windows build, and the processor architecture. Prompts and inference stay 100% local.
