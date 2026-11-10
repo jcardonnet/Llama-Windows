@@ -322,7 +322,7 @@
                              unloaded (PlayGlyphVisible) so a loaded/loading
                              row isn't accidentally deleted mid-use. Opens a
                              confirmation flyout — deleting re-downloads GBs. -->
-                        <Button Visibility="{x:Bind Model.PlayGlyphVisible, Mode=OneWay}"
+                        <Button Visibility="{x:Bind Model.DeleteVisible, Mode=OneWay}"
                                 Click="LocalModelDelete_Click"
                                 Tag="{x:Bind Model}"
                                 Padding="6"

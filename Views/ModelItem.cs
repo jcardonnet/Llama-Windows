@@ -28,6 +28,7 @@ public sealed class ModelItem : IModel, INotifyPropertyChanged
     private double _loadFraction;
     private bool _isLoaded;
     private bool _loadFailed;
+    private bool _canRemove = true;
     private ImageSource? _logo;
 
     /// <summary>Display label (e.g. "GPT-OSS 20B (mxfp4)").</summary>
@@ -588,6 +589,29 @@ public sealed class ModelItem : IModel, INotifyPropertyChanged
     /// </summary>
     public bool PlayGlyphVisible => !IsDownloading && !IsLoading && !IsLoaded && !DownloadFailed && !LoadFailed && !DownloadPaused;
 
+    /// <summary>
+    /// Whether the llama router says this model's files can be removed by the
+    /// server (<c>can_remove</c>). False for preset models — the app's enrolled
+    /// folders and other preset-injected entries — and for models the router
+    /// does not own; Delete is hidden for those instead of issuing a DELETE
+    /// the router answers with 500. Defaults true for catalog/Hub rows until a
+    /// server snapshot says otherwise.
+    /// </summary>
+    public bool CanRemove
+    {
+        get => _canRemove;
+        set
+        {
+            if (_canRemove == value) return;
+            _canRemove = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(DeleteVisible));
+        }
+    }
+
+    /// <summary>The row's Delete button: idle and removable by the router.</summary>
+    public bool DeleteVisible => PlayGlyphVisible && CanRemove;
+
     /// <summary>True when the download progress ring should be visible.</summary>
     public bool ProgressRingVisible => IsDownloading;
 
@@ -729,7 +753,13 @@ public sealed class ModelItem : IModel, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? prop = null)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(prop));
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(prop));
+        // Delete is the play-glyph slot plus removability; every state change
+        // that flips PlayGlyphVisible must also refresh the Delete binding.
+        if (prop == nameof(PlayGlyphVisible))
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteVisible)));
+    }
 
     // Resolved-logo cache: parsing an SVG into an SvgImageSource isn't free,
     // and the same few brands repeat across every row — the Recommended list

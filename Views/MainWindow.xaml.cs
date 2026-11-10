@@ -552,6 +552,9 @@ namespace LlamaApp.Views
             item.IsDownloading = sm.IsDownloading;
             item.DownloadPaused = sm.IsIncomplete;
             item.PendingFirstDownload = sm.IsIncomplete;
+            // The router only allows DELETE for cache-owned files; preset
+            // models (enrolled folders) answer 500. Hide Delete for those.
+            item.CanRemove = sm.CanRemove;
         }
 
         /// <summary>
@@ -2800,6 +2803,11 @@ namespace LlamaApp.Views
 
                 if (item is not null)
                 {
+                    // Preset models (enrolled folders) are not removable by the
+                    // router; keep the row's Delete visibility in sync with the
+                    // server's can_remove on every snapshot.
+                    item.CanRemove = sm.CanRemove;
+
                     // Rows built before the file existed (an app-driven
                     // download) learn their on-disk path here — it drives the
                     // row's "reveal in Explorer" button. Resolution retries on

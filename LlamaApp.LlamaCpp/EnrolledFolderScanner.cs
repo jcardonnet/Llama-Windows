@@ -210,6 +210,13 @@ public static class EnrolledFolderScanner
         if (LocalModelImport.IsMmprojPath(path)) return false;
         if (IsDraftName(stem)) return false;
 
+        // llama.cpp's repo ships ggml-vocab-*.gguf fixtures (vocabulary-only
+        // files, not loadable models). Enrolling the repo's models/ folder used
+        // to list all of them as models that could never load or be deleted.
+        if (stem.StartsWith("ggml-vocab-", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(stem, "ggml-vocab", StringComparison.OrdinalIgnoreCase))
+            return false;
+
         if (stem.Contains(LocalModelImport.ShardMarker, StringComparison.OrdinalIgnoreCase))
         {
             // First shard only; the marker without a valid set base is a

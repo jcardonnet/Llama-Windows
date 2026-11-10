@@ -37,6 +37,22 @@ public sealed class EnrolledFolderScannerTests : IDisposable
         return path;
     }
 
+    [Fact]
+    public void LlamaCppVocabFixtures_AreNotListedAsModels()
+    {
+        // llama.cpp's models/ folder ships ggml-vocab-*.gguf vocabulary
+        // fixtures; enrolling that folder must not produce rows that can never
+        // load (or be deleted — the router marks preset models can_remove:false).
+        var real = WriteGguf("fam", "model-Q8_0.gguf");
+        WriteGguf("fam", "ggml-vocab-aquila.gguf");
+        WriteGguf("fam", "ggml-vocab-qwen2.gguf");
+
+        var models = EnrolledFolderScanner.Scan([_root]);
+
+        var only = Assert.Single(models);
+        Assert.Equal(real, only.ModelPath);
+    }
+
     // ---- discovery ----
 
     [Fact]

@@ -20,6 +20,37 @@ public class ModelItemStateMachineTests
     // ----- Glyph visibility state machine ----------------------------------
 
     [Fact]
+    public void Delete_Visibility_Requires_Removability_And_Idle_State()
+    {
+        var item = new ModelItem();
+        Assert.True(item.DeleteVisible);
+
+        // Preset models (enrolled folders) report can_remove:false; the router
+        // answers DELETE with 500, so the button must disappear.
+        item.CanRemove = false;
+        Assert.False(item.DeleteVisible);
+        item.CanRemove = true;
+        Assert.True(item.DeleteVisible);
+
+        item.IsDownloading = true;
+        Assert.False(item.DeleteVisible);
+        item.IsDownloading = false;
+        Assert.True(item.DeleteVisible);
+    }
+
+    [Fact]
+    public void SeedServerState_Carries_CanRemove()
+    {
+        var item = new ModelItem();
+        var server = new LlamaManager.ServerModel { Id = "preset-model", CanRemove = false };
+
+        MainWindow.SeedServerState(item, server);
+
+        Assert.False(item.CanRemove);
+        Assert.False(item.DeleteVisible);
+    }
+
+    [Fact]
     public void Default_State_Shows_Play_Glyph()
     {
         var item = new ModelItem();
