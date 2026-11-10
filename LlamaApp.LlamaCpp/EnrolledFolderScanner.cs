@@ -160,23 +160,39 @@ public static class EnrolledFolderScanner
     /// Renders the INI sections for the scanned models:
     /// <c>[name]</c> with <c>model = path</c>, plus <c>mmproj</c> and
     /// <c>spec-draft-model</c> when the sidecars were found — the same keys
-    /// llama.cpp's own models-dir scan sets (the INI parser's key grammar is
-    /// <c>ident</c> and its section names accept anything but <c>]</c>; the
-    /// section names here are file stems and folder prefixes, which can never
-    /// carry <c>/</c> or <c>:</c> on Windows, and every name is vetted against
-    /// <c>[</c>/<c>]</c> in <see cref="NameAndOrder"/>). Empty for no models.
+    /// llama.cpp's own models-dir scan sets. <paramref name="perModelLines"/>
+    /// (keyed by section name) appends the app-managed lines for the same
+    /// model — context length, spec type, curated extra options — so an
+    /// enrolled model with app settings is one section, never a duplicate
+    /// header (the router resets a repeated section). Unsafe section names and
+    /// values the INI parser would truncate (<c>#</c>/<c>;</c>, control chars)
+    /// are skipped with a log line rather than rendered. Empty for no models.
     /// </summary>
-    public static string RenderSections(IEnumerable<EnrolledFolderModel> models)
+    public static string RenderSections(
+        IEnumerable<EnrolledFolderModel> models,
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? perModelLines = null)
     {
         var sb = new StringBuilder();
         foreach (var model in models)
         {
+            if (!LlamaManager.IsSafeSectionId(model.Name) ||
+                !PresetIniSyntax.IsSafeValue(model.ModelPath) ||
+                (model.MmprojPath is not null && !PresetIniSyntax.IsSafeValue(model.MmprojPath)) ||
+                (model.DraftPath is not null && !PresetIniSyntax.IsSafeValue(model.DraftPath)))
+            {
+                Log.Warn($"model folders: skipping '{model.Name}' — its name or a path can't be represented safely in the preset INI");
+                continue;
+            }
+
             sb.Append('[').Append(model.Name).Append(']').Append('\n');
             sb.Append("model = ").Append(model.ModelPath).Append('\n');
             if (model.MmprojPath is not null)
                 sb.Append("mmproj = ").Append(model.MmprojPath).Append('\n');
             if (model.DraftPath is not null)
                 sb.Append("spec-draft-model = ").Append(model.DraftPath).Append('\n');
+            if (perModelLines is not null && perModelLines.TryGetValue(model.Name, out var lines))
+                foreach (var line in lines)
+                    sb.Append(line).Append('\n');
             sb.Append('\n');
         }
         return sb.ToString();

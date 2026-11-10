@@ -1695,6 +1695,7 @@ namespace LlamaApp.Views
 
         /// <summary>The details ViewModel currently shown; null when the list is showing.</summary>
         private ModelItemDetailsViewModel? _detailsViewModel;
+        private bool _hideDetailsPromptOpen;
 
         /// <summary>Row body of an installed row: open the model details view.</summary>
         private void LocalModelDetails_Click(object sender, RoutedEventArgs e)
@@ -1786,10 +1787,105 @@ namespace LlamaApp.Views
         }
 
         /// <summary>Back row in the details view: return to the models list.</summary>
-        private void DetailsView_BackRequested(object? sender, EventArgs e) => HideDetails();
+        private async void DetailsView_BackRequested(object? sender, EventArgs e)
+            => await TryHideDetailsAsync(DetailsView);
 
         /// <summary>Back row in the family details view: return to the models list.</summary>
         private void FamilyDetailsView_BackRequested(object? sender, EventArgs e) => HideDetails();
+
+        /// <summary>
+        /// User-initiated close of the details view. If the extra-options field
+        /// has unsaved edits, asks before discarding them; otherwise closes as
+        /// before. Internal closes (delete/download) call <see cref="HideDetails"/>
+        /// directly — they are explicit actions and already own the outcome.
+        /// </summary>
+        private async Task<bool> TryHideDetailsAsync(FrameworkElement anchor)
+        {
+            if (_hideDetailsPromptOpen) return false;
+            if (DetailsView.Visibility != Visibility.Visible)
+            {
+                HideDetails();
+                return true;
+            }
+
+            try
+            {
+                if (_detailsViewModel?.HasUnsavedExtraArguments == true)
+                {
+                    _hideDetailsPromptOpen = true;
+                    try
+                    {
+                        if (!await ConfirmDiscardExtraArgumentsAsync(anchor)) return false;
+                    }
+                    finally
+                    {
+                        _hideDetailsPromptOpen = false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // A failed prompt must never close the view and silently lose
+                // the edit; keep editing and log.
+                _hideDetailsPromptOpen = false;
+                Log.Warn(ex, "discard-extra-options prompt failed");
+                return false;
+            }
+
+            HideDetails();
+            return true;
+        }
+
+        /// <summary>Flyout confirmation mirroring the delete prompt: keep editing or discard.</summary>
+        private async Task<bool> ConfirmDiscardExtraArgumentsAsync(FrameworkElement anchor)
+        {
+            var confirmed = new TaskCompletionSource<bool>();
+            var discardButton = new Button
+            {
+                Content = "Discard",
+                Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                    Windows.UI.Color.FromArgb(255, 248, 81, 73)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+            };
+            var keepButton = new Button { Content = "Keep editing" };
+            var flyout = new Flyout
+            {
+                Content = new StackPanel
+                {
+                    Spacing = 10,
+                    MaxWidth = 260,
+                    Children =
+                    {
+                        new TextBlock
+                        {
+                            Text = "Discard unsaved extra options?",
+                            FontSize = 13,
+                            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                        },
+                        new TextBlock
+                        {
+                            Text = "The text in Extra preset options hasn't been saved.",
+                            FontSize = 12,
+                            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                            TextWrapping = TextWrapping.Wrap,
+                        },
+                        new StackPanel
+                        {
+                            Orientation = Orientation.Horizontal,
+                            Spacing = 8,
+                            HorizontalAlignment = HorizontalAlignment.Right,
+                            Children = { keepButton, discardButton },
+                        },
+                    },
+                },
+            };
+            keepButton.Click += (_, _) => { flyout.Hide(); confirmed.TrySetResult(false); };
+            discardButton.Click += (_, _) => { flyout.Hide(); confirmed.TrySetResult(true); };
+            flyout.Closed += (_, _) => confirmed.TrySetResult(false);
+            try { flyout.ShowAt(anchor); }
+            catch { return false; }
+            return await confirmed.Task;
+        }
 
         /// <summary>Swaps the details view back for the models list.</summary>
         private void HideDetails()
@@ -1906,6 +2002,66 @@ namespace LlamaApp.Views
         }
 
         void IModelItemDetailsHost.CloseDetails() => HideDetails();
+
+        string IModelItemDetailsHost.GetModelExtraArguments(string serverModelId)
+        {
+            var extras = Settings.Current.ModelExtraArguments;
+            if (extras is null) return "";
+            lock (extras)
+                return extras.TryGetValue(serverModelId, out var text) ? text : "";
+        }
+
+        async Task<ModelExtraArgumentsSaveResult> IModelItemDetailsHost.SaveModelExtraArgumentsAsync(
+            string serverModelId, string arguments)
+        {
+            var text = arguments.Trim();
+            if (!ModelPresetOptions.TryParse(text, out var options, out var errors))
+                return new ModelExtraArgumentsSaveResult(false, false, null,
+                    ModelPresetOptions.FormatError(errors[0]));
+
+            var extras = Settings.Current.ModelExtraArguments;
+            if (extras is null)
+                return new ModelExtraArgumentsSaveResult(false, false, null, "Settings are unavailable.");
+
+            string? previous = null;
+            bool existed;
+            lock (extras)
+            {
+                existed = extras.TryGetValue(serverModelId, out previous);
+                if (text.Length == 0) extras.Remove(serverModelId);
+                else extras[serverModelId] = text;
+            }
+
+            if (!Settings.Current.Save())
+            {
+                // Keep memory and disk in sync: a failed Save must not leave the
+                // live dictionary (shared with the renderer) holding the edit.
+                lock (extras)
+                {
+                    if (existed) extras[serverModelId] = previous!;
+                    else extras.Remove(serverModelId);
+                }
+                return new ModelExtraArgumentsSaveResult(false, false, null,
+                    "Could not save settings.");
+            }
+
+            var reloaded = await LlamaManager.Shared.ReloadModelPresetsAsync();
+            string? warning = reloaded
+                ? null
+                : "Saved, but the running server did not reload its presets. Restart the server to apply them.";
+
+            var conflicts = ModelPresetOptions.FindGlobalConflicts(
+                Settings.Current.CustomServeArguments, options);
+            if (conflicts.Count > 0)
+            {
+                var conflict = "Also set in Custom serve arguments (the global value wins): " +
+                               string.Join(", ", conflicts) + ".";
+                warning = warning is null ? conflict : warning + " " + conflict;
+            }
+
+            Log.Info($"per-model preset options for '{serverModelId}': {(text.Length == 0 ? "cleared" : "saved")}");
+            return new ModelExtraArgumentsSaveResult(true, reloaded, warning, null);
+        }
 
         // ----- IModelFamilyDetailsHost: the family details view drives the shell's workflows -----
 
@@ -2867,6 +3023,11 @@ namespace LlamaApp.Views
             lock (contexts) removed = contexts.Remove(serverModelId);
             var specTypes = Settings.Current.ModelSpeculativeTypes;
             lock (specTypes) removed |= specTypes.Remove(serverModelId);
+            // Curated per-model options must not outlive the model: a later
+            // re-download of the same id would silently inherit them.
+            var extras = Settings.Current.ModelExtraArguments;
+            if (extras is not null)
+                lock (extras) removed |= extras.Remove(serverModelId);
             return removed;
         }
 
@@ -2990,9 +3151,12 @@ namespace LlamaApp.Views
         /// </summary>
         private void AdoptServerId(ModelItem item, string serverId)
         {
-            foreach (var key in _localByServerId
-                         .Where(kv => ReferenceEquals(kv.Value, item))
-                         .Select(kv => kv.Key).ToList())
+            var previousId = ((IModel)item).ServerModelId;
+            var oldIds = _localByServerId
+                .Where(kv => ReferenceEquals(kv.Value, item))
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var key in oldIds)
                 _localByServerId.Remove(key);
 
             var (_, quant) = SplitServerId(serverId);
@@ -3004,6 +3168,50 @@ namespace LlamaApp.Views
             }
 
             _localByServerId[serverId] = item;
+
+            if (!string.Equals(previousId, serverId, StringComparison.Ordinal))
+                oldIds.Add(previousId);
+            MigrateModelExtraArguments(oldIds, serverId);
+        }
+
+        /// <summary>
+        /// Moves curated per-model options from the IDs a row used before the
+        /// server resolved its quant to the adopted ID. Without this, options
+        /// saved against a bare repo or a catalog quant would orphan when the
+        /// server reports the canonical `repo:quant` (and the next save would
+        /// start from an empty field).
+        /// </summary>
+        private static void MigrateModelExtraArguments(IReadOnlyList<string> oldIds, string newId)
+        {
+            var extras = Settings.Current.ModelExtraArguments;
+            if (extras is null) return;
+
+            var moved = false;
+            lock (extras)
+            {
+                foreach (var oldId in oldIds.Distinct(StringComparer.Ordinal))
+                {
+                    if (string.IsNullOrEmpty(oldId) ||
+                        string.Equals(oldId, newId, StringComparison.Ordinal)) continue;
+                    if (!extras.TryGetValue(oldId, out var text)) continue;
+                    if (!extras.ContainsKey(newId)) extras[newId] = text;
+                    extras.Remove(oldId);
+                    moved = true;
+                }
+            }
+
+            if (!moved) return;
+            Log.Info($"per-model preset options migrated to adopted id '{newId}'");
+            Settings.Current.Save();
+
+            // Don't reload while a model is downloading/loading: the router
+            // unloads such models when their preset changes, which would abort
+            // the very download that adopted this id. The next preset write
+            // (or server start) applies the migration.
+            if (!LlamaManager.Shared.LastModelsSnapshot.Any(m => m.IsDownloading || m.IsLoading))
+                _ = LlamaManager.Shared.ReloadModelPresetsAsync();
+            else
+                Log.Info("preset reload deferred until the in-flight model finishes");
         }
 
         // ---- Footer actions ----
@@ -3698,9 +3906,11 @@ namespace LlamaApp.Views
         {
             args.Handled = true;
             // With a details view open, Esc steps back to the models list
-            // instead of dismissing the whole flyout.
-            if (DetailsView.Visibility == Visibility.Visible ||
-                FamilyDetailsView.Visibility == Visibility.Visible)
+            // instead of dismissing the whole flyout. Unsaved extra options
+            // prompt before they are discarded.
+            if (DetailsView.Visibility == Visibility.Visible)
+                _ = TryHideDetailsAsync(DetailsView);
+            else if (FamilyDetailsView.Visibility == Visibility.Visible)
                 HideDetails();
             else
                 HideFlyout();

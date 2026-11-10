@@ -257,6 +257,12 @@ namespace LlamaApp
             // scan (Settings → General → Model folders) renders a
             // model = path section per discovery.
             Llama.LlamaManager.Shared.ModelFolders = Settings.Current.ModelFolders;
+            // Curated per-model options share the same INI channel: the
+            // details view mutates the settings dictionary and the manager
+            // renders only allowlisted keys (an unknown preset key aborts the
+            // router, so validation happens before the write).
+            Llama.LlamaManager.Shared.ModelExtraArguments = Settings.Current.ModelExtraArguments;
+            Common.Log.Info($"per-model preset option entries: {Settings.Current.ModelExtraArguments.Count}");
             Common.Log.Info($"cache directory: {Settings.Current.CacheDirectory}");
             // Presence only — never log the token itself.
             Common.Log.Info($"HF token: {(string.IsNullOrWhiteSpace(Settings.Current.HuggingFaceToken) ? "not set" : "configured")}");

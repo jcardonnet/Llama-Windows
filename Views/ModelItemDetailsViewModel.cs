@@ -17,6 +17,16 @@ namespace LlamaApp.Views;
 public sealed record ModelRuntimeDetails(long ModelSizeBytes, GgufContextInfo? ContextInfo, string? FilePath = null);
 
 /// <summary>
+/// The result of saving a model's curated options: whether settings were
+/// persisted, whether the running server accepted the preset reload, and an
+/// optional user-facing warning or error. A save is successful when
+/// <see cref="Saved"/> is true even if <see cref="Reloaded"/> is false (the
+/// options apply at the next server start).
+/// </summary>
+public sealed record ModelExtraArgumentsSaveResult(
+    bool Saved, bool Reloaded, string? Warning, string? Error);
+
+/// <summary>
 /// The shell operations <see cref="ModelItemDetailsViewModel"/> needs that it
 /// must not own: navigation-ish actions (open URIs, clipboard), the existing
 /// load/download/delete workflows (which live in <c>MainWindow</c> and stay
@@ -64,6 +74,17 @@ public interface IModelItemDetailsHost
 
     /// <summary>Closes the details view, returning to the model list.</summary>
     void CloseDetails();
+
+    /// <summary>The saved curated preset-options text for the model ("" when unset).</summary>
+    string GetModelExtraArguments(string serverModelId);
+
+    /// <summary>
+    /// Validates, persists, re-renders the app preset INI and asks the running
+    /// server to reload it. Returns a result the view can surface; never throws
+    /// for expected validation/save failures.
+    /// </summary>
+    Task<ModelExtraArgumentsSaveResult> SaveModelExtraArgumentsAsync(
+        string serverModelId, string arguments);
 }
 
 /// <summary>
@@ -105,6 +126,11 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     private bool _apiRequestCopied;
     private long _modelSizeBytes;
     private bool _openChatWhenLoaded;
+    private string _extraArguments = "";
+    private string _savedExtraArguments = "";
+    private string? _extraArgumentsError;
+    private string? _extraArgumentsMessage;
+    private bool _isSavingExtraArguments;
 
     public ModelItemDetailsViewModel(
         ModelItem model,
@@ -125,6 +151,14 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
             ?? (token => LlamaManager.Shared.ContextMemoryBudgetAsync(token));
         _fitParamsProbe = fitParamsProbe ?? DefaultFitParamsProbe;
         _dispatchToUi = dispatchToUi;
+
+        _extraArguments = _savedExtraArguments = host.GetModelExtraArguments(ServerModelId);
+        if (!string.IsNullOrWhiteSpace(_savedExtraArguments) &&
+            !ModelPresetOptions.TryParse(_savedExtraArguments, out _, out var savedErrors))
+        {
+            _extraArgumentsError =
+                "Saved options are invalid: " + ModelPresetOptions.FormatError(savedErrors[0]);
+        }
 
         // Live state sync: the shared ModelItem already reflects every server
         // state change (the poller drives it), so the details page inherits
@@ -200,10 +234,10 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
             : "Chat with model";
 
     /// <summary>Delete is offered for installed models, and only while unloaded and idle.</summary>
-    public bool CanDelete => IsInstalled && !IsBusy && Model.PlayGlyphVisible;
+    public bool CanDelete => IsInstalled && !IsBusy && !_isSavingExtraArguments && Model.PlayGlyphVisible;
 
     /// <summary>Download is offered for Hub models not yet installed.</summary>
-    public bool CanDownload => !IsInstalled && !IsBusy;
+    public bool CanDownload => !IsInstalled && !IsBusy && !_isSavingExtraArguments;
 
     /// <summary>
     /// The context section shows for on-disk models (GGUF-derived ladder +
@@ -247,6 +281,144 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         if (!option.IsSelectable || !ContextLengths.Contains(option)) return;
         SelectedContextLength = option;
         _saveContextPreference(ServerModelId, option.Tokens);
+    }
+
+    // ---- Curated per-model llama.cpp options ----
+
+    /// <summary>The supported-options text for the info flyout (built from the allowlist).</summary>
+    public string SupportedOptionsText => ModelPresetOptions.DescribeSupported();
+
+    /// <summary>
+    /// A built-in family default for this model (e.g. colgrep-agent needs
+    /// <c>special = true</c>), shown even when the field is empty. The renderer
+    /// applies it unless the user sets the same key explicitly.
+    /// </summary>
+    public string ExtraArgumentsDefaultHint => ModelPresetDefaults.DescribeFor(ServerModelId) ?? "";
+    public bool HasExtraArgumentsDefaultHint => ExtraArgumentsDefaultHint.Length > 0;
+
+    /// <summary>Installed models only; the details view is not reachable for Hub rows.</summary>
+    public bool ExtraArgumentsVisible => IsInstalled && !string.IsNullOrEmpty(ServerModelId);
+
+    /// <summary>False while the model is being downloaded/loaded (it has no stable file/id yet).</summary>
+    public bool ExtraArgumentsEnabled =>
+        !Model.IsDownloading && !Model.IsLoading && !Model.DownloadPaused && !Model.DownloadFailed;
+
+    /// <summary>The raw text the user is editing (one option per line).</summary>
+    public string ExtraArguments
+    {
+        get => _extraArguments;
+        set
+        {
+            var next = value ?? "";
+            if (string.Equals(_extraArguments, next, StringComparison.Ordinal)) return;
+            _extraArguments = next;
+            _extraArgumentsError = null;
+            _extraArgumentsMessage = null;
+            OnPropertyChanged();
+            NotifyExtraArguments();
+        }
+    }
+
+    /// <summary>True when the field differs from what is persisted.</summary>
+    public bool HasUnsavedExtraArguments =>
+        !string.Equals(ExtraArguments.Trim(), _savedExtraArguments, StringComparison.Ordinal);
+
+    /// <summary>The Save button: only a valid, dirty, idle model can be saved.</summary>
+    public bool CanSaveExtraArguments =>
+        ExtraArgumentsVisible && ExtraArgumentsEnabled &&
+        !_isSavingExtraArguments && HasUnsavedExtraArguments;
+
+    /// <summary>Line-addressed validation/save error ("" when none).</summary>
+    public string ExtraArgumentsError => _extraArgumentsError ?? "";
+    public bool HasExtraArgumentsError => _extraArgumentsError is not null;
+
+    /// <summary>Transient success message or reload warning ("" when none).</summary>
+    public string ExtraArgumentsSaveMessage => _extraArgumentsMessage ?? "";
+    public bool HasExtraArgumentsSaveMessage => !string.IsNullOrEmpty(_extraArgumentsMessage);
+
+    /// <summary>True when the saved text should be applied after a reload, not now.</summary>
+    public bool ExtraArgumentsAppliesOnReload => Model.IsLoaded;
+
+    /// <summary>Header dot: a saved configuration exists.</summary>
+    public bool HasConfiguredExtraArguments => !string.IsNullOrEmpty(_savedExtraArguments);
+
+    public bool IsSavingExtraArguments => _isSavingExtraArguments;
+
+    /// <summary>
+    /// True when saving would reload the preset and therefore unload the
+    /// running model; the view asks for confirmation before calling Save.
+    /// </summary>
+    public bool RequiresUnloadConfirmation => HasUnsavedExtraArguments && Model.IsLoaded;
+
+    /// <summary>
+    /// Validates the text with the shared checker, persists it through the
+    /// host, and surfaces the save/reload outcome. Never throws for expected
+    /// failures.
+    /// </summary>
+    public async Task<bool> SaveExtraArgumentsAsync()
+    {
+        if (!CanSaveExtraArguments) return false;
+
+        var text = ExtraArguments.Trim();
+        if (!ModelPresetOptions.TryParse(text, out _, out var errors))
+        {
+            _extraArgumentsError = ModelPresetOptions.FormatError(errors[0]);
+            _extraArgumentsMessage = null;
+            NotifyExtraArguments();
+            return false;
+        }
+
+        _isSavingExtraArguments = true;
+        _extraArgumentsError = null;
+        _extraArgumentsMessage = null;
+        NotifyExtraArguments();
+        try
+        {
+            var result = await _host.SaveModelExtraArgumentsAsync(ServerModelId, text);
+            if (!result.Saved)
+            {
+                _extraArgumentsError = result.Error ?? "Could not save the extra options.";
+                return false;
+            }
+
+            _extraArguments = text;
+            _savedExtraArguments = text;
+            _extraArgumentsMessage = result.Warning ??
+                (Model.IsLoaded
+                    ? "Saved. This model is running with its previous options; unload it from the list, then load it again."
+                    : "Saved. Applies the next time this model loads.");
+            OnPropertyChanged(nameof(ExtraArguments));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // The host is expected to return failures, not throw; keep the UI
+            // usable if it does (e.g. an unexpected I/O exception).
+            _extraArgumentsError = "Could not save the extra options: " + ex.Message;
+            return false;
+        }
+        finally
+        {
+            _isSavingExtraArguments = false;
+            NotifyExtraArguments();
+        }
+    }
+
+    private void NotifyExtraArguments()
+    {
+        OnPropertyChanged(nameof(IsSavingExtraArguments));
+        OnPropertyChanged(nameof(CanSaveExtraArguments));
+        OnPropertyChanged(nameof(ExtraArgumentsError));
+        OnPropertyChanged(nameof(HasExtraArgumentsError));
+        OnPropertyChanged(nameof(ExtraArgumentsSaveMessage));
+        OnPropertyChanged(nameof(HasExtraArgumentsSaveMessage));
+        OnPropertyChanged(nameof(HasUnsavedExtraArguments));
+        OnPropertyChanged(nameof(HasConfiguredExtraArguments));
+        OnPropertyChanged(nameof(RequiresUnloadConfirmation));
+        OnPropertyChanged(nameof(ExtraArgumentsAppliesOnReload));
+        OnPropertyChanged(nameof(ExtraArgumentsEnabled));
+        OnPropertyChanged(nameof(CanDelete));
+        OnPropertyChanged(nameof(CanDownload));
     }
 
     // ---- Lazy details loading ----
@@ -649,6 +821,14 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         OnPropertyChanged(nameof(ChatActionEnabled));
         OnPropertyChanged(nameof(ChatActionText));
         OnPropertyChanged(nameof(CanDelete));
+        OnPropertyChanged(nameof(CanDownload));
+        OnPropertyChanged(nameof(ExtraArgumentsVisible));
+        OnPropertyChanged(nameof(ExtraArgumentsEnabled));
+        OnPropertyChanged(nameof(CanSaveExtraArguments));
+        OnPropertyChanged(nameof(ExtraArgumentsAppliesOnReload));
+        OnPropertyChanged(nameof(RequiresUnloadConfirmation));
+        OnPropertyChanged(nameof(ExtraArgumentsDefaultHint));
+        OnPropertyChanged(nameof(HasExtraArgumentsDefaultHint));
     }
 
     /// <summary>Sets a copied-feedback flag briefly, then clears it (fire-and-forget).</summary>

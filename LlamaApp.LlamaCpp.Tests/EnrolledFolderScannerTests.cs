@@ -277,4 +277,37 @@ public sealed class EnrolledFolderScannerTests : IDisposable
             $"mmproj = {mmproj}\n\n",
             ini);
     }
+
+    [Fact]
+    public void RenderSections_AppendsPerModelLines()
+    {
+        var models = new[]
+        {
+            new EnrolledFolderModel("fam", @"D:\fam.gguf", null, null),
+        };
+        var lines = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["fam"] = new[] { "ctx-size = 4096", "threads = 8" },
+        };
+
+        Assert.Equal(
+            "[fam]\n" +
+            "model = D:\\fam.gguf\n" +
+            "ctx-size = 4096\n" +
+            "threads = 8\n\n",
+            EnrolledFolderScanner.RenderSections(models, lines));
+    }
+
+    [Fact]
+    public void RenderSections_SkipsPathsTheIniParserWouldTruncate()
+    {
+        // A Windows filename may contain '#'; llama.cpp ends a value at it, so
+        // rendering the path raw would point the model at a different file.
+        var models = new[]
+        {
+            new EnrolledFolderModel("fam", @"D:\models\a#b.gguf", null, null),
+        };
+
+        Assert.Equal("", EnrolledFolderScanner.RenderSections(models));
+    }
 }
