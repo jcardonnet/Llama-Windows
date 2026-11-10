@@ -283,6 +283,7 @@ namespace LlamaApp.Views
         // the expensive work (or race the deferred populate) while the flyout
         // has never been opened.
         private bool _startupWorkDone;
+        private bool _presetDefaultsEnsured;
 
         /// <summary>
         /// Runs the flyout's expensive startup work exactly once, on first
@@ -2627,6 +2628,11 @@ namespace LlamaApp.Views
         /// </summary>
         private void LlamaManager_StateChanged(object? sender, EventArgs e)
         {
+            // A restart rewrites the preset before the router can report cache
+            // models; re-arm the one-time family-default reload.
+            if (LlamaManager.Shared.ServerStatus != LlamaManager.ServerState.Running)
+                _presetDefaultsEnsured = false;
+
             // StateChanged can fire off the UI thread (the server process Exited
             // handler runs on a thread-pool thread), so marshal before touching
             // any UI element / the LocalModels collection.
@@ -2726,6 +2732,20 @@ namespace LlamaApp.Views
         /// </summary>
         private void LlamaManager_ModelsChanged(object? sender, IReadOnlyList<LlamaManager.ServerModel> models)
         {
+            // The preset file is written before the server starts, when cache /
+            // models-dir models are not yet known. One reload after the first
+            // snapshot lets family defaults (e.g. colgrep-agent's `special`)
+            // reach the router for those models too. Safe here: only when no
+            // model is active, so the reload cannot unload anything.
+            if (!_presetDefaultsEnsured && models.Count > 0 &&
+                models.Any(m => ModelPresetDefaults.HasDefaults(m.Id)) &&
+                models.All(m => !m.IsLoaded && !m.IsLoading && !m.IsDownloading))
+            {
+                _presetDefaultsEnsured = true;
+                Log.Info("applying family preset defaults to server-reported models");
+                _ = LlamaManager.Shared.ReloadModelPresetsAsync();
+            }
+
             var dq = DispatcherQueue;
             if (dq is null || dq.HasThreadAccess)
                 _ = ReconcileAsync(models);
