@@ -538,6 +538,20 @@ public sealed class LlamaManager
     /// </summary>
     public IReadOnlyList<string>? ModelFolders { get; set; }
 
+    /// <summary>
+    /// Curated per-model llama.cpp preset options (keyed by server model id,
+    /// <c>repo:quant</c>, or enrolled section name; the value is the raw text
+    /// the user typed in the details view). Shared by reference from
+    /// <c>Settings.Current.ModelExtraArguments</c> and rendered into the same
+    /// <c>--models-preset</c> INI as <see cref="ModelContextLengths"/>, after
+    /// validation by <see cref="ModelPresetOptions"/> — only canonical
+    /// allowlisted keys are ever written, because llama.cpp aborts the whole
+    /// router on an unrecognized preset key. Snapshotted under its lock by
+    /// <see cref="WriteContextPresetsIniAsync"/>; only affects servers the app
+    /// launches.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? ModelExtraArguments { get; set; }
+
     private Process? _serverProcess;
 
     // Single-flight guard for EnsureLlamaOrDownloadAsync / StartServerAsync. Called
@@ -1658,6 +1672,231 @@ public sealed class LlamaManager
     }
 
     /// <summary>
+    /// The single composer for the <c>--models-preset</c> INI: app-managed
+    /// context lengths, speculative types, curated per-model options, and
+    /// enrolled folder models, merged so every model appears in exactly one
+    /// section. Extras are parsed through <see cref="ModelPresetOptions"/> and
+    /// invalid entries are skipped (an unknown key aborts the router). Enrolled
+    /// paths are validated against <see cref="PresetIniSyntax.IsSafeValue"/>
+    /// because llama.cpp truncates a value at <c>#</c>/<c>;</c>; an enrolled
+    /// name that collides with a server-reported model id keeps the server's
+    /// file and only carries the app options. Pure apart from the collision /
+    /// invalid-path warnings.
+    /// </summary>
+    internal static string RenderPresetFile(
+        IReadOnlyList<KeyValuePair<string, int>> contextLengths,
+        IReadOnlyList<KeyValuePair<string, string>>? speculativeTypes,
+        IReadOnlyList<KeyValuePair<string, string>>? extraArguments,
+        IReadOnlyList<EnrolledFolderModel>? enrolledModels,
+        IReadOnlyList<ServerModel>? serverModels = null)
+    {
+        var sections = new Dictionary<string, PresetSection>(PresetIniSyntax.SectionComparer);
+        var appOrder = new List<PresetSection>();
+        var extrasOnly = new List<PresetSection>();
+        var enrolledOrder = new List<PresetSection>();
+
+        PresetSection GetSection(string canonical, bool enrolled)
+        {
+            if (!sections.TryGetValue(canonical, out var section))
+            {
+                section = new PresetSection(canonical, enrolled);
+                sections[canonical] = section;
+                if (enrolled) enrolledOrder.Add(section);
+                else appOrder.Add(section);
+            }
+            return section;
+        }
+
+        // Enrolled models first: they own their section's model/sidecar lines,
+        // and app options merge into the same section instead of a duplicate.
+        var serverIds = new HashSet<string>(PresetIniSyntax.SectionComparer);
+        if (serverModels is not null)
+            foreach (var model in serverModels)
+                // The router reports the preset's OWN sections as models with
+                // source "preset"; treating those as conflicts would strip the
+                // model = path from every enrolled section on the next reload.
+                if (!string.Equals(model.Source, "preset", StringComparison.OrdinalIgnoreCase))
+                    serverIds.Add(PresetIniSyntax.CanonicalSectionId(model.Id));
+
+        if (enrolledModels is not null)
+        {
+            foreach (var model in enrolledModels)
+            {
+                if (!PresetIniSyntax.IsSafeSectionId(model.Name))
+                {
+                    Log.Warn($"enrolled preset: unsafe section id '{model.Name}' skipped");
+                    continue;
+                }
+                if (!PresetIniSyntax.IsSafeValue(model.ModelPath) ||
+                    (model.MmprojPath is not null && !PresetIniSyntax.IsSafeValue(model.MmprojPath)) ||
+                    (model.DraftPath is not null && !PresetIniSyntax.IsSafeValue(model.DraftPath)))
+                {
+                    Log.Warn($"enrolled preset: '{model.Name}' has a path the INI parser would truncate; skipped");
+                    continue;
+                }
+
+                var canonical = PresetIniSyntax.CanonicalSectionId(model.Name);
+                if (serverIds.Contains(canonical))
+                {
+                    // The cache/models-dir already owns this id; emitting a
+                    // second `model =` for it would replace the server's file.
+                    // App options for the id still merge into a normal section.
+                    Log.Warn($"enrolled preset: '{model.Name}' collides with a server model id; its file path is not rendered");
+                    continue;
+                }
+
+                var section = GetSection(canonical, enrolled: true);
+                section.ModelLines.Add("model = " + model.ModelPath);
+                if (model.MmprojPath is not null)
+                    section.ModelLines.Add("mmproj = " + model.MmprojPath);
+                if (model.DraftPath is not null)
+                    section.ModelLines.Add("spec-draft-model = " + model.DraftPath);
+            }
+        }
+
+        var renderedSpecs = new HashSet<string>(PresetIniSyntax.SectionComparer);
+        var renderedContexts = new HashSet<string>(PresetIniSyntax.SectionComparer);
+        var specByCanonical = new Dictionary<string, string>(PresetIniSyntax.SectionComparer);
+        if (speculativeTypes is not null)
+            foreach (var (id, specType) in speculativeTypes)
+                if (PresetIniSyntax.IsSafeValue(specType))
+                    specByCanonical[PresetIniSyntax.CanonicalSectionId(id)] = specType;
+
+        foreach (var (id, context) in contextLengths)
+        {
+            if (context <= 0) continue;
+            var canonical = PresetIniSyntax.CanonicalSectionId(id);
+            if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
+            if (!renderedContexts.Add(canonical)) continue;
+
+            var section = GetSection(canonical, enrolled: false);
+            section.AppLines.Add($"ctx-size = {context}");
+            if (specByCanonical.TryGetValue(canonical, out var specType))
+            {
+                section.AppLines.Add("spec-type = " + specType);
+                renderedSpecs.Add(canonical);
+            }
+        }
+
+        // Spec-only entries keep the existing order (speculativeTypes order),
+        // skipping ids already rendered with a context.
+        if (speculativeTypes is not null)
+        {
+            foreach (var (id, specType) in speculativeTypes)
+            {
+                if (!PresetIniSyntax.IsSafeValue(specType)) continue;
+                var canonical = PresetIniSyntax.CanonicalSectionId(id);
+                if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
+                if (renderedSpecs.Contains(canonical)) continue;
+                if (!specByCanonical.ContainsKey(canonical)) continue;
+
+                var section = GetSection(canonical, enrolled: false);
+                section.AppLines.Add("spec-type = " + specType);
+                renderedSpecs.Add(canonical);
+            }
+        }
+
+        // Curated per-model options. Invalid entries are never rendered; the
+        // writer logs them. Extras-only sections sort by id for a deterministic
+        // file (dictionary write order is not a contract).
+        var explicitKeys = new Dictionary<string, HashSet<string>>(PresetIniSyntax.SectionComparer);
+        void AddOption(PresetSection section, ModelPresetOption option)
+        {
+            var prefix = option.Key + " = ";
+            if (section.AppLines.Any(line =>
+                    line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                return;
+            section.AppLines.Add(ModelPresetOptions.ToIniLine(option));
+        }
+
+        if (extraArguments is not null)
+        {
+            foreach (var (id, text) in extraArguments)
+            {
+                var canonical = PresetIniSyntax.CanonicalSectionId(id);
+                if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
+                if (!ModelPresetOptions.TryParse(text, out var options, out _) || options.Count == 0)
+                    continue;
+
+                if (!explicitKeys.TryGetValue(canonical, out var keys))
+                {
+                    keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    explicitKeys[canonical] = keys;
+                }
+                foreach (var option in options) keys.Add(option.Key);
+
+                var existed = sections.ContainsKey(canonical);
+                var section = GetSection(canonical, enrolled: false);
+                foreach (var option in ModelPresetDefaults.Merge(id, options))
+                    AddOption(section, option);
+                if (!existed && !section.Enrolled)
+                    extrasOnly.Add(section);
+            }
+        }
+
+        // Family defaults (e.g. colgrep-agent needs `special`). Applied after
+        // the user's own entries so an explicit `special = false` wins; covers
+        // every variant the app can see — enrolled files, context/spec
+        // entries, and cache/models-dir models reported by the server.
+        var defaultCandidates = new HashSet<string>(sections.Keys, PresetIniSyntax.SectionComparer);
+        if (serverModels is not null)
+            foreach (var model in serverModels)
+                if (!string.Equals(model.Source, "preset", StringComparison.OrdinalIgnoreCase))
+                    defaultCandidates.Add(PresetIniSyntax.CanonicalSectionId(model.Id));
+        foreach (var (id, _) in contextLengths)
+            defaultCandidates.Add(PresetIniSyntax.CanonicalSectionId(id));
+        if (speculativeTypes is not null)
+            foreach (var (id, _) in speculativeTypes)
+                defaultCandidates.Add(PresetIniSyntax.CanonicalSectionId(id));
+
+        foreach (var id in defaultCandidates)
+        {
+            if (!ModelPresetDefaults.HasDefaults(id)) continue;
+            var canonical = PresetIniSyntax.CanonicalSectionId(id);
+            if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
+
+            var existed = sections.ContainsKey(canonical);
+            var section = GetSection(canonical, enrolled: false);
+            foreach (var option in ModelPresetDefaults.For(id))
+            {
+                if (explicitKeys.TryGetValue(canonical, out var keys) && keys.Contains(option.Key))
+                    continue;
+                AddOption(section, option);
+            }
+            if (!existed && !section.Enrolled)
+                extrasOnly.Add(section);
+        }
+
+        var ordered = new List<PresetSection>(appOrder.Count + extrasOnly.Count + enrolledOrder.Count);
+        var extrasOnlySet = new HashSet<PresetSection>(extrasOnly);
+        ordered.AddRange(appOrder.Where(s => !s.Enrolled && !extrasOnlySet.Contains(s)));
+        ordered.AddRange(extrasOnly
+            .Where(s => !s.Enrolled)
+            .Distinct()
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase));
+        ordered.AddRange(enrolledOrder);
+
+        var sb = new StringBuilder();
+        foreach (var section in ordered.Distinct())
+        {
+            sb.Append('[').Append(section.Name).Append(']').Append('\n');
+            foreach (var line in section.ModelLines) sb.Append(line).Append('\n');
+            foreach (var line in section.AppLines) sb.Append(line).Append('\n');
+            sb.Append('\n');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>One rendered preset section: model/sidecar lines and app options.</summary>
+    private sealed class PresetSection(string name, bool enrolled)
+    {
+        public string Name { get; } = name;
+        public bool Enrolled { get; } = enrolled;
+        public List<string> ModelLines { get; } = [];
+        public List<string> AppLines { get; } = [];
+    }
+
+    /// <summary>
     /// Whether a model id can head a preset INI section: non-empty, no
     /// <c>[</c>/<c>]</c> (either would end the section early — a filename may
     /// legally contain them, and <c>[x]junk]</c> silently misapplies the
@@ -1669,8 +1908,7 @@ public sealed class LlamaManager
     /// Windows filenames can't carry CR/LF.
     /// </summary>
     internal static bool IsSafeSectionId(string id)
-        => !string.IsNullOrWhiteSpace(id)
-           && id.All(c => c is not ('[' or ']') && !char.IsControl(c));
+        => PresetIniSyntax.IsSafeSectionId(id);
 
     /// <summary>
     /// Whether a value can follow a preset INI key: non-empty, no control
@@ -1678,7 +1916,7 @@ public sealed class LlamaManager
     /// entry must not be able to append arbitrary keys).
     /// </summary>
     internal static bool IsSafeIniValue(string value)
-        => !string.IsNullOrWhiteSpace(value) && value.All(c => !char.IsControl(c));
+        => PresetIniSyntax.IsSafeValue(value);
 
     /// <summary>
     /// Writes the <c>--models-preset</c> INI from
@@ -1710,6 +1948,9 @@ public sealed class LlamaManager
             if (contexts is not null) lock (contexts) contextItems.AddRange(contexts);
             var specItems = new List<KeyValuePair<string, string>>();
             if (specs is not null) lock (specs) specItems.AddRange(specs);
+            var extras = ModelExtraArguments;
+            var extraItems = new List<KeyValuePair<string, string>>();
+            if (extras is not null) lock (extras) extraItems.AddRange(extras);
 
             // Enrolled model folders (Settings → General → Model folders): a
             // recursive scan is disk I/O, so it runs off the caller's thread —
@@ -1746,13 +1987,30 @@ public sealed class LlamaManager
             bool Exists(string id) => FindModelFilePath(id) is not null;
             contextItems = FilterExistingModels(contextItems, IsBusy, Exists);
             specItems = FilterExistingModels(specItems, IsBusy, Exists);
+            extraItems = FilterExistingModels(extraItems, IsBusy, Exists);
+            Log.Info($"per-model preset options: {extraItems.Count} configured");
+
+            // Invalid entries never reach the INI (an unknown key aborts the
+            // whole router). Log the model id and the first error only — the
+            // raw text is user data and may be large.
+            var invalidExtras = 0;
+            foreach (var (id, text) in extraItems)
+            {
+                if (ModelPresetOptions.TryParse(text, out _, out var extraErrors)) continue;
+                invalidExtras++;
+                var first = extraErrors.Count > 0
+                    ? ModelPresetOptions.FormatError(extraErrors[0])
+                    : "invalid options";
+                Log.Warn($"per-model preset options for '{id}' are invalid and were not rendered: {first}");
+            }
 
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(ContextPresetPath)!);
                 File.WriteAllText(ContextPresetPath,
-                    RenderModelsPresetIni(contextItems, specItems) +
-                    EnrolledFolderScanner.RenderSections(enrolled));
+                    RenderPresetFile(contextItems, specItems, extraItems, enrolled, LastModelsSnapshot));
+                if (invalidExtras > 0)
+                    Log.Warn($"{invalidExtras} model(s) have invalid per-model preset options; not rendered");
                 return ContextPresetPath;
             }
             catch (Exception ex)
@@ -1768,31 +2026,41 @@ public sealed class LlamaManager
     }
 
     /// <summary>
-    /// Re-renders the models-preset INI (context lengths, spec types, and the
-    /// user's enrolled model folders — the folder scan runs fresh, so newly
-    /// dropped files are picked up too) and asks the running server to
-    /// re-read its presets (<c>GET /models?reload=1</c> re-runs the router's
-    /// preset load, which re-reads the <c>--models-preset</c> file). Called
-    /// when the user changes a model's context length, enrolls or removes a
-    /// model folder, or when the draft-head detector records a spec type, so
-    /// the next <c>/models/load</c> picks it up. Reloading does not disturb
-    /// already-loaded models. Best-effort: a server the app didn't launch
-    /// (no <c>--models-preset</c> flag) won't read the file — the preference
-    /// then takes effect on the next app-launched start.
+    /// Re-renders the models-preset INI (context lengths, spec types, curated
+    /// per-model options, and the user's enrolled model folders — the folder
+    /// scan runs fresh, so newly dropped files are picked up too) and asks the
+    /// running server to re-read its presets (<c>GET /models?reload=1</c>).
+    /// Returns false when the file could not be written, the server is
+    /// running but rejected the reload, or the reload transport failed.
+    ///
+    /// <para><b>Reload is not side-effect-free:</b> the router re-reads the
+    /// preset file and unloads a running, loading, or sleeping model whose
+    /// preset changed. The details view therefore confirms the unload before
+    /// saving options for an active model. A server the app did not launch (no
+    /// <c>--models-preset</c> flag) may accept the request but ignore the file;
+    /// the caller should prefer the "restart required" message in that case.
+    /// </para>
     /// </summary>
-    public async Task ReloadModelPresetsAsync(CancellationToken cancel = default)
+    public async Task<bool> ReloadModelPresetsAsync(CancellationToken cancel = default)
     {
-        await WriteContextPresetsIniAsync();
-        if (ServerStatus != ServerState.Running) return;
+        if (await WriteContextPresetsIniAsync() is null) return false;
+        if (ServerStatus != ServerState.Running) return true;
         try
         {
             using var budget = WithTimeout(TimeSpan.FromSeconds(10), cancel);
             using var resp = await _http.GetAsync("/models?reload=1", budget.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log.Warn($"model preset reload rejected (HTTP {(int)resp.StatusCode})");
+                return false;
+            }
             Log.Info($"model context presets reloaded (HTTP {(int)resp.StatusCode})");
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Log.Debug("model context preset reload failed: " + ex.Message);
+            Log.Warn("model context preset reload failed: " + ex.Message);
+            return false;
         }
     }
 

@@ -232,23 +232,31 @@ public sealed class Settings
     /// </summary>
     public List<string> ModelFolders { get; set; } = [];
 
+    /// <summary>
+    /// Extra llama.cpp preset options chosen per model, keyed by the server
+    /// model id (<c>repo:quant</c>) or the enrolled model's section name. The
+    /// value is the raw text the user typed in the model details view — one
+    /// curated option per line (<c>key = value</c> or <c>--key value</c>),
+    /// validated by <see cref="Common.ModelPresetOptions"/> before it is
+    /// stored. The manager renders these into the <c>--models-preset</c> INI
+    /// at the next server start or preset reload; they take effect when the
+    /// model is next loaded. Shared by reference with
+    /// <see cref="Llama.LlamaManager"/>
+    /// (<see cref="Llama.LlamaManager.ModelExtraArguments"/>), so the save
+    /// path and the renderer must mutate/snapshot it under its lock.
+    /// <para>Only the curated allowlist is supported: arbitrary llama.cpp keys
+    /// can abort the router on startup, and the alias/env spellings bypass a
+    /// name-based denylist. <c>ctx-size</c>/<c>spec-type</c>/<c>cache-type-*</c>
+    /// and identity/bind options are deliberately not accepted here.</para>
+    /// </summary>
+    public Dictionary<string, string> ModelExtraArguments { get; set; } = new();
+
     private static Settings Load()
     {
         try
         {
             if (File.Exists(SettingsPath))
-            {
-                var json = File.ReadAllText(SettingsPath);
-                // One parse: deserialization and the legacy-secret migration
-                // read from the same JsonDocument.
-                using var doc = JsonDocument.Parse(json);
-                var s = doc.RootElement.Deserialize(SettingsJsonContext.Default.Settings);
-                if (s != null)
-                {
-                    RestoreSecrets(s, doc.RootElement);
-                    return s;
-                }
-            }
+                return FromJson(File.ReadAllText(SettingsPath));
         }
         catch (Exception ex)
         {
@@ -257,6 +265,31 @@ public sealed class Settings
             Common.Log.Warn(ex, "settings load failed; using defaults");
         }
         return new Settings();
+    }
+
+    /// <summary>
+    /// Deserializes settings from JSON and normalizes the collections.
+    /// Separate from <see cref="Load"/> so tests can exercise missing and
+    /// explicit-null properties without touching the user's settings file.
+    /// An explicit <c>null</c> for a collection would otherwise crash
+    /// <see cref="Save"/> (<c>lock (null)</c>) and the details view.
+    /// </summary>
+    internal static Settings FromJson(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var s = doc.RootElement.Deserialize(SettingsJsonContext.Default.Settings)
+                ?? new Settings();
+        RestoreSecrets(s, doc.RootElement);
+        NormalizeCollections(s);
+        return s;
+    }
+
+    private static void NormalizeCollections(Settings s)
+    {
+        s.ModelContextLengths ??= new();
+        s.ModelSpeculativeTypes ??= new();
+        s.ModelFolders ??= [];
+        s.ModelExtraArguments ??= new();
     }
 
     /// <summary>
@@ -338,9 +371,9 @@ public sealed class Settings
         {
             ProtectedHuggingFaceToken = Common.SecretProtector.Protect(HuggingFaceToken);
             ProtectedServerApiKey = Common.SecretProtector.Protect(ServerApiKey);
-            // The three collections below are shared BY REFERENCE with
+            // The four collections below are shared BY REFERENCE with
             // background readers/writers (LlamaManager's INI renderer and
-            // folder scan, the draft-head poller — see
+            // folder scan, the draft-head poller, the details view — see
             // DraftHeadDetection.Apply's lock note), and the serializer
             // traverses them. Save takes the same per-collection locks those
             // sites use, in declaration order (no lock holder ever acquires
@@ -351,6 +384,7 @@ public sealed class Settings
             lock (ModelContextLengths)
             lock (ModelSpeculativeTypes)
             lock (ModelFolders)
+            lock (ModelExtraArguments)
                 json = JsonSerializer.Serialize(this, SettingsJsonContext.Default.Settings);
             File.WriteAllText(SettingsPath, json);
             return true;

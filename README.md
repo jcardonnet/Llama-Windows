@@ -16,6 +16,7 @@ Grab the latest `.msixbundle` (x64 + ARM64) from [**Releases**](https://github.c
 - **Zero-setup llama.cpp** — uses your existing `llama.exe`, or downloads one for you
 - **One-click models** — browse and download recommended models from the Hugging Face Hub
 - **Model details** — click any model for a context-length picker with per-option memory estimates (read from the GGUF header), remembered per model, plus chat, copy-model-ID, curl-request, and Hugging Face actions
+- **Per-model tuning** — set a curated set of llama.cpp options (GPU layers, Flash Attention, MoE CPU offload, batching, fit) for one model in its details page; the app validates them before writing the router preset, and colgrep-agent models get their required `special` flag automatically
 - **Standard storage** — models live in the Hugging Face cache, shared with `llama.cpp` and other tools
 - **Spotlight-like overlay** — press `Alt+Space` from any app to chat with your loaded model
 
@@ -36,7 +37,7 @@ Llama manages a `llama serve` process and talks to it over its REST API. Your mo
 Llama sends no telemetry — no events, no analytics, no install id. The only thing outbound HTTP requests (model downloads, release-update checks, and calls to the local llama-server) carry is the standard User-Agent header:
 
 ```
-llama-win/0.12.0 (10.0.26100; x64)
+llama-win/0.16.0 (10.0.26100; x64)
 ```
 
 — the app version, the Windows build, and the processor architecture. Prompts and inference stay 100% local.

@@ -229,6 +229,114 @@
                 </ItemsControl>
             </StackPanel>
 
+            <!-- Curated per-model llama.cpp options. Collapsed by default so
+                 the action rows stay above the fold; the allowlist and the
+                 checker live in LlamaApp.Common.ModelPresetOptions, so the
+                 UI can't submit a key that would abort the router. -->
+            <Expander HorizontalAlignment="Stretch"
+                      IsExpanded="False"
+                      Visibility="{x:Bind ViewModel.ExtraArgumentsVisible, Mode=OneWay}">
+                <Expander.Header>
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Extra preset options"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Center" />
+                        <Ellipse Width="6" Height="6"
+                                 Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                 VerticalAlignment="Center"
+                                 Visibility="{x:Bind ViewModel.HasConfiguredExtraArguments, Mode=OneWay}" />
+                        <Button Padding="2,0"
+                                MinWidth="0" MinHeight="0"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="About extra preset options">
+                            <FontIcon Glyph="&#xE946;" FontSize="11" Opacity="0.6" />
+                            <Button.Flyout>
+                                <Flyout Placement="Top">
+                                    <StackPanel Spacing="6" MaxWidth="320">
+                                        <TextBlock Text="Supported per-model options"
+                                                   FontSize="12"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="{x:Bind ViewModel.SupportedOptionsText, Mode=OneWay}"
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap"
+                                                   IsTextSelectionEnabled="True" />
+                                        <TextBlock Text="One option per line, e.g. n-gpu-layers = 20 or --flash-attn on. Prefixes and aliases are normalized. An option also set in Settings → Custom serve arguments is overridden by that global value."
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
+                    </StackPanel>
+                </Expander.Header>
+
+                <StackPanel Spacing="6">
+                    <TextBox x:Name="ExtraArgumentsBox"
+                             Text="{x:Bind ViewModel.ExtraArguments, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             IsEnabled="{x:Bind ViewModel.ExtraArgumentsEnabled, Mode=OneWay}"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
+                             FontFamily="Consolas"
+                             FontSize="12"
+                             IsSpellCheckEnabled="False"
+                             PlaceholderText="n-gpu-layers = 20"
+                             MinHeight="52"
+                             MaxHeight="120"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             AutomationProperties.Name="Extra preset options"
+                             AutomationProperties.HelpText="One curated llama.cpp option per line, key = value or --key value. Applies when the model next loads." />
+
+                    <TextBlock Text="One option per line. Curated set — open the info button for the list. Applies when this model next loads."
+                               FontSize="11"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+
+                    <TextBlock Text="{x:Bind ViewModel.ExtraArgumentsDefaultHint, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.HasExtraArgumentsDefaultHint, Mode=OneWay}"
+                               FontSize="11"
+                               FontStyle="Italic"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button Content="Save"
+                                Click="SaveExtraArguments_Click"
+                                IsEnabled="{x:Bind ViewModel.CanSaveExtraArguments, Mode=OneWay}"
+                                Padding="10,4"
+                                FontSize="12"
+                                AutomationProperties.Name="Save extra preset options for this model" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{x:Bind ViewModel.ExtraArgumentsSaveMessage, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasExtraArgumentsSaveMessage, Mode=OneWay}"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+
+                    <TextBlock Text="{x:Bind ViewModel.ExtraArgumentsError, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.HasExtraArgumentsError, Mode=OneWay}"
+                               FontSize="12"
+                               Foreground="#F85149"
+                               TextWrapping="Wrap"
+                               AutomationProperties.LiveSetting="Assertive" />
+
+                    <TextBlock Text="Applies the next time this model loads. Saving a loaded model unloads it first."
+                               Visibility="{x:Bind ViewModel.ExtraArgumentsAppliesOnReload, Mode=OneWay}"
+                               FontSize="11"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Expander>
+
             <Rectangle Height="1"
                        Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
 

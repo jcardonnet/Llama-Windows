@@ -31,6 +31,9 @@ public sealed class ModelItemDetailsViewModelTests
         public List<ModelItem> Downloads { get; } = [];
         public List<ModelItem> Deletes { get; } = [];
         public int CloseDetailsCalls;
+        public Dictionary<string, string> ExtraArguments { get; } = [];
+        public List<(string Id, string Text)> SavedExtraArguments { get; } = [];
+        public ModelExtraArgumentsSaveResult ExtraResult { get; set; } = new(true, true, null, null);
 
         public Task LoadModelAsync(ModelItem model) { Loads.Add(model); return Task.CompletedTask; }
         public Task DownloadAsync(ModelItem model) { Downloads.Add(model); return Task.CompletedTask; }
@@ -38,6 +41,21 @@ public sealed class ModelItemDetailsViewModelTests
         public void CopyText(string text) => CopiedTexts.Add(text);
         public void OpenUri(string uri) => OpenedUris.Add(uri);
         public void CloseDetails() => CloseDetailsCalls++;
+
+        public string GetModelExtraArguments(string serverModelId)
+            => ExtraArguments.TryGetValue(serverModelId, out var text) ? text : "";
+
+        public Task<ModelExtraArgumentsSaveResult> SaveModelExtraArgumentsAsync(
+            string serverModelId, string arguments)
+        {
+            SavedExtraArguments.Add((serverModelId, arguments));
+            if (ExtraResult.Saved)
+            {
+                if (arguments.Length == 0) ExtraArguments.Remove(serverModelId);
+                else ExtraArguments[serverModelId] = arguments;
+            }
+            return Task.FromResult(ExtraResult);
+        }
     }
 
     /// <summary>In-memory stand-in for Settings.ModelContextLengths.</summary>
@@ -679,4 +697,203 @@ public sealed class ModelItemDetailsViewModelTests
 
         Assert.Empty(vm.ContextLengths); // canceled before the ladder was built
     }
+
+    // ---- curated per-model preset options ----
+
+    private const string InstalledId = "unsloth/Qwen3-4B-GGUF:Q4_K_M";
+
+    [Fact]
+    public void ExtraArguments_LoadSavedTextAndConfiguredState()
+    {
+        var host = new FakeHost();
+        host.ExtraArguments[InstalledId] = "n-gpu-layers = 20";
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        Assert.Equal("n-gpu-layers = 20", vm.ExtraArguments);
+        Assert.True(vm.ExtraArgumentsVisible);
+        Assert.True(vm.HasConfiguredExtraArguments);
+        Assert.False(vm.HasUnsavedExtraArguments);
+        Assert.False(vm.CanSaveExtraArguments);
+        Assert.False(vm.HasExtraArgumentsError);
+        Assert.Contains("n-gpu-layers", vm.SupportedOptionsText);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_SaveValid_CallsHostAndUpdatesBaseline()
+    {
+        var host = new FakeHost();
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        vm.ExtraArguments = "threads = 8";
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Equal(new[] { (InstalledId, "threads = 8") }, host.SavedExtraArguments);
+        Assert.Equal("threads = 8", host.ExtraArguments[InstalledId]);
+        Assert.False(vm.HasUnsavedExtraArguments);
+        Assert.False(vm.CanSaveExtraArguments);
+        Assert.False(vm.HasExtraArgumentsError);
+        Assert.Contains("Saved", vm.ExtraArgumentsSaveMessage);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_Invalid_DoesNotCallHostAndShowsLine()
+    {
+        var host = new FakeHost();
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        vm.ExtraArguments = "threads = 0";
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.False(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Empty(host.SavedExtraArguments);
+        Assert.True(vm.HasExtraArgumentsError);
+        Assert.Contains("Line 1", vm.ExtraArgumentsError);
+        Assert.True(vm.HasUnsavedExtraArguments);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_HostFailure_KeepsDirtyAndError()
+    {
+        var host = new FakeHost
+        {
+            ExtraResult = new ModelExtraArgumentsSaveResult(
+                Saved: false, Reloaded: false, Warning: null, Error: "Could not save settings."),
+        };
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        vm.ExtraArguments = "threads = 8";
+        Assert.False(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Equal("Could not save settings.", vm.ExtraArgumentsError);
+        Assert.True(vm.HasUnsavedExtraArguments);
+        Assert.False(vm.HasConfiguredExtraArguments);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_ClearingRemovesTheEntry()
+    {
+        var host = new FakeHost();
+        host.ExtraArguments[InstalledId] = "threads = 8";
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        Assert.True(vm.HasConfiguredExtraArguments);
+        vm.ExtraArguments = "";
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Equal(new[] { (InstalledId, "") }, host.SavedExtraArguments);
+        Assert.False(host.ExtraArguments.ContainsKey(InstalledId));
+        Assert.False(vm.HasConfiguredExtraArguments);
+        Assert.False(vm.HasUnsavedExtraArguments);
+    }
+
+    [Fact]
+    public void ExtraArguments_HiddenForHubRows()
+    {
+        var vm = MakeVm(HubItem(), new FakeHost(), new FakePreferences());
+
+        Assert.False(vm.IsInstalled);
+        Assert.False(vm.ExtraArgumentsVisible);
+    }
+
+    [Fact]
+    public void ExtraArguments_DisabledWhileDownloading()
+    {
+        var item = InstalledItem();
+        item.IsDownloading = true;
+
+        var vm = MakeVm(item, new FakeHost(), new FakePreferences());
+
+        Assert.False(vm.ExtraArgumentsEnabled);
+        Assert.False(vm.CanSaveExtraArguments);
+    }
+
+    [Fact]
+    public void ExtraArguments_SavedInvalidText_ShowsErrorOnConstruction()
+    {
+        var host = new FakeHost();
+        host.ExtraArguments[InstalledId] = "n-gpu-layer = 20";
+
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        Assert.True(vm.HasExtraArgumentsError);
+        Assert.Contains("invalid", vm.ExtraArgumentsError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_LoadedModel_RequiresConfirmationAndExplainsNextLoad()
+    {
+        var item = InstalledItem();
+        item.IsLoaded = true;
+        var vm = MakeVm(item, new FakeHost(), new FakePreferences());
+
+        Assert.True(vm.ExtraArgumentsAppliesOnReload);
+        vm.ExtraArguments = "threads = 8";
+        Assert.True(vm.RequiresUnloadConfirmation);
+
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Contains("previous options", vm.ExtraArgumentsSaveMessage);
+    }
+
+    [Fact]
+    public void ExtraArguments_LoadedStateChange_NotifiesDerivedProperties()
+    {
+        var item = InstalledItem();
+        var vm = MakeVm(item, new FakeHost(), new FakePreferences());
+        var raised = new List<string?>();
+        vm.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        item.IsLoaded = true;
+
+        Assert.Contains(nameof(vm.ExtraArgumentsAppliesOnReload), raised);
+        Assert.Contains(nameof(vm.RequiresUnloadConfirmation), raised);
+    }
+
+    [Fact]
+    public void ExtraArguments_ColgrepModel_ShowsTheBuiltInDefaultHint()
+    {
+        var item = new ModelItem
+        {
+            Name = "colgrep-agent-2B",
+            RepoName = "lightonai/colgrep-agent-2B-GGUF",
+            Quant = "Q8_0",
+            Parameters = "2B",
+            Size = "2.5 GB",
+            License = "Apache 2.0",
+        };
+
+        var vm = MakeVm(item, new FakeHost(), new FakePreferences());
+
+        Assert.True(vm.HasExtraArgumentsDefaultHint);
+        Assert.Contains("special = true", vm.ExtraArgumentsDefaultHint);
+        Assert.Contains("special = false", vm.ExtraArgumentsDefaultHint);
+        Assert.Equal("", vm.ExtraArguments); // a default, not a saved entry
+    }
+
+    [Fact]
+    public void ExtraArguments_OtherModels_HaveNoDefaultHint()
+    {
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences());
+        Assert.False(vm.HasExtraArgumentsDefaultHint);
+        Assert.Equal("", vm.ExtraArgumentsDefaultHint);
+    }
+
+    [Fact]
+    public async Task ExtraArguments_EditingAfterSave_EnablesSaveAgain()
+    {
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences());
+
+        vm.ExtraArguments = "threads = 8";
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+        Assert.False(vm.CanSaveExtraArguments);
+
+        vm.ExtraArguments = "threads = 6";
+        Assert.True(vm.CanSaveExtraArguments);
+    }
 }
+
