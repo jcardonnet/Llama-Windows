@@ -1799,6 +1799,64 @@ public sealed class LlamaManager
         // Curated per-model options. Invalid entries are never rendered; the
         // writer logs them. Extras-only sections sort by id for a deterministic
         // file (dictionary write order is not a contract).
+        //
+        // An alias is a model NAME to the router: it must not collide with any
+        // known model id or another model's alias (the router refuses to load
+        // the whole preset on either). Drop collisions here as a last line of
+        // defense; the save path reports them to the user first.
+        var knownModelIds = new HashSet<string>(sections.Keys, PresetIniSyntax.SectionComparer);
+        if (serverModels is not null)
+            foreach (var model in serverModels)
+                knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(model.Id));
+        foreach (var (id, _) in contextLengths)
+            knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(id));
+        if (speculativeTypes is not null)
+            foreach (var (id, _) in speculativeTypes)
+                knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(id));
+        if (extraArguments is not null)
+            foreach (var (id, _) in extraArguments)
+                knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(id));
+
+        var aliasOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<ModelPresetOption> FilterAliases(
+            string id, IReadOnlyList<ModelPresetOption> options)
+        {
+            var aliasOption = options.FirstOrDefault(o =>
+                string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrEmpty(aliasOption.Key)) return options;
+
+            var kept = new List<string>();
+            foreach (var raw in aliasOption.Value.Split(
+                         ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                var alias = raw.Trim();
+                if (alias.Length == 0) continue;
+                if (knownModelIds.Contains(alias))
+                {
+                    Log.Warn($"preset alias '{alias}' for '{id}' collides with a model name; skipped");
+                    continue;
+                }
+                if (aliasOwners.TryGetValue(alias, out var owner) &&
+                    !string.Equals(owner, id, StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Warn($"preset alias '{alias}' for '{id}' is already used by '{owner}'; skipped");
+                    continue;
+                }
+                if (!kept.Contains(alias, StringComparer.OrdinalIgnoreCase))
+                {
+                    aliasOwners[alias] = id;
+                    kept.Add(alias);
+                }
+            }
+
+            var filtered = options
+                .Where(o => !string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (kept.Count > 0)
+                filtered.Add(new ModelPresetOption("alias", string.Join(", ", kept)));
+            return filtered;
+        }
+
         var explicitKeys = new Dictionary<string, HashSet<string>>(PresetIniSyntax.SectionComparer);
         void AddOption(PresetSection section, ModelPresetOption option)
         {
@@ -1811,12 +1869,22 @@ public sealed class LlamaManager
 
         if (extraArguments is not null)
         {
+            var parsed = new List<(string Id, string Canonical, IReadOnlyList<ModelPresetOption> Options)>();
             foreach (var (id, text) in extraArguments)
             {
                 var canonical = PresetIniSyntax.CanonicalSectionId(id);
                 if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
                 if (!ModelPresetOptions.TryParse(text, out var options, out _) || options.Count == 0)
                     continue;
+                parsed.Add((id, canonical, options));
+            }
+
+            // Deterministic alias-claim order independent of dictionary order.
+            parsed.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Canonical, b.Canonical));
+            foreach (var (id, canonical, parsedOptions) in parsed)
+            {
+                var options = FilterAliases(id, parsedOptions);
+                if (options.Count == 0) continue;
 
                 if (!explicitKeys.TryGetValue(canonical, out var keys))
                 {
@@ -3348,9 +3416,20 @@ public sealed class LlamaManager
     /// matches — the row then simply hides its reveal button.
     /// </summary>
     public string? FindModelFilePath(string serverModelId)
-        => FindModelFilePath(
-            serverModelId, _enrolledModelPaths,
-            ModelFileLocator.DefaultCacheRoots(), ManagedModelsDir);
+    {
+        // The configured cache may live on another drive (Settings →
+        // CacheDirectory). DefaultCacheRoots only sees env vars and the
+        // user-profile defaults, so include it explicitly — otherwise cache
+        // models look missing: per-model options are filtered out and the
+        // delete/ghost paths misclassify them.
+        var roots = ModelFileLocator.DefaultCacheRoots().ToList();
+        if (!string.IsNullOrWhiteSpace(CacheDirectory) &&
+            !roots.Contains(CacheDirectory, StringComparer.OrdinalIgnoreCase))
+            roots.Insert(0, CacheDirectory);
+
+        return FindModelFilePath(
+            serverModelId, _enrolledModelPaths, roots, ManagedModelsDir);
+    }
 
     /// <summary>
     /// <see cref="FindModelFilePath(string)"/> with its sources injectable —

@@ -291,7 +291,7 @@
                              AutomationProperties.Name="Extra preset options"
                              AutomationProperties.HelpText="One curated llama.cpp option per line, key = value or --key value. Applies when the model next loads." />
 
-                    <TextBlock Text="One option per line. Curated set — open the info button for the list. Applies when this model next loads."
+                    <TextBlock Text="One option per line. Curated set — open the info button for the list. Use alias = my-model to give clients a stable model name. Applies when this model next loads."
                                FontSize="11"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap" />

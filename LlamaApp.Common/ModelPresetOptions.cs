@@ -23,6 +23,9 @@ public enum ModelPresetValueKind
 
     /// <summary>A boolean flag (<c>--special</c>), accepted as true/false/on/off/1/0 or bare.</summary>
     Boolean,
+
+    /// <summary>Free-form text with a maximum length (e.g. a model alias).</summary>
+    String,
 }
 
 /// <summary>
@@ -76,6 +79,8 @@ public static class ModelPresetOptions
         new("flash-attn", ["fa"], ModelPresetValueKind.Enum, 0, 0, ["on", "off", "auto"]),
         new("special", ["sp"], ModelPresetValueKind.Boolean, 0, 0, ["true", "false"],
             "keeps special/control tokens in generated text (debugging)"),
+        new("alias", ["a"], ModelPresetValueKind.String, 0, 256, [],
+            "client-facing model name(s); comma-separated; requests may use these instead of the repo:quant id"),
         new("batch-size", ["b"], ModelPresetValueKind.Integer, 1, 8192, []),
         new("ubatch-size", ["ub"], ModelPresetValueKind.Integer, 1, 8192, []),
         new("n-cpu-moe", ["ncmoe"], ModelPresetValueKind.Integer, 0, 999, []),
@@ -112,8 +117,6 @@ public static class ModelPresetOptions
             ["spec-type"] = "Speculative decoding is detected automatically; it can't be set here.",
             ["model"] = "The model file is managed by Llama.",
             ["m"] = "The model file is managed by Llama.",
-            ["alias"] = "The model alias is managed by Llama.",
-            ["a"] = "The model alias is managed by Llama.",
             ["hf"] = "The model source is managed by Llama.",
             ["hf-repo"] = "The model source is managed by Llama.",
             ["hfr"] = "The model source is managed by Llama.",
@@ -285,6 +288,45 @@ public static class ModelPresetOptions
             .ToList();
     }
 
+    /// <summary>
+    /// Aliases in <paramref name="options"/> that may not be used: they equal
+    /// a known model id (including <paramref name="modelId"/>) or an alias
+    /// already claimed by another model. Used by the save path; the INI writer
+    /// also drops such aliases so a bad entry can never abort the router.
+    /// </summary>
+    public static IReadOnlyList<string> FindAliasConflicts(
+        string modelId,
+        IReadOnlyList<ModelPresetOption> options,
+        IEnumerable<string> modelIds,
+        IEnumerable<IReadOnlyList<ModelPresetOption>> otherOptions)
+    {
+        var aliases = AliasesOf(options);
+        if (aliases.Count == 0) return [];
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { modelId };
+        foreach (var id in modelIds) ids.Add(id);
+
+        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var others in otherOptions)
+            foreach (var alias in AliasesOf(others)) claimed.Add(alias);
+
+        return aliases
+            .Where(alias => ids.Contains(alias) || claimed.Contains(alias))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> AliasesOf(IReadOnlyList<ModelPresetOption> options)
+    {
+        var option = options.FirstOrDefault(o =>
+            string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrEmpty(option.Key)) return [];
+        return option.Value
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     /// <summary>Human-readable allowlist for the info flyout.</summary>
     public static string DescribeSupported()
     {
@@ -307,6 +349,7 @@ public static class ModelPresetOptions
         ModelPresetValueKind.Integer => $"{spec.Min}–{spec.Max}",
         ModelPresetValueKind.Enum => string.Join(" / ", spec.Values),
         ModelPresetValueKind.Boolean => "true / false",
+        ModelPresetValueKind.String => $"text up to {spec.Max} characters, comma-separated",
         _ => $"{spec.Min}–{spec.Max}, {string.Join(", ", spec.Values)}",
     };
 
@@ -431,9 +474,12 @@ public static class ModelPresetOptions
             error = $"'{spec.Key}' needs a value ({DescribeValue(spec)}).";
             return false;
         }
-        if (value.Length > MaxValueChars)
+        var maxValueChars = spec.Kind == ModelPresetValueKind.String
+            ? spec.Max
+            : MaxValueChars;
+        if (value.Length > maxValueChars)
         {
-            error = $"'{spec.Key}' value is too long.";
+            error = $"'{spec.Key}' value is too long (max {maxValueChars} characters).";
             return false;
         }
         foreach (var c in value)
@@ -442,6 +488,24 @@ public static class ModelPresetOptions
                 error = $"'{spec.Key}' value can't contain control characters, # or ;.";
                 return false;
             }
+
+        if (spec.Kind == ModelPresetValueKind.String)
+        {
+            var parts = value.Split(',', StringSplitOptions.TrimEntries);
+            if (parts.Any(p => p.Length == 0))
+            {
+                error = $"'{spec.Key}' must contain at least one non-empty name.";
+                return false;
+            }
+            if (parts.Any(p => p.Length > 128))
+            {
+                error = $"Each '{spec.Key}' name must be at most 128 characters.";
+                return false;
+            }
+            value = string.Join(", ", parts.Distinct(StringComparer.Ordinal));
+            return true;
+        }
+
         if (value.Any(char.IsWhiteSpace))
         {
             error = $"'{spec.Key}' value can't contain spaces.";
@@ -495,6 +559,8 @@ public static class ModelPresetOptions
                 $"'{spec.Key}' must be an integer between {spec.Min} and {spec.Max}.",
             ModelPresetValueKind.Enum =>
                 $"'{spec.Key}' must be one of: {string.Join(", ", spec.Values)}.",
+            ModelPresetValueKind.String =>
+                $"'{spec.Key}' must be text up to {spec.Max} characters.",
             _ =>
                 $"'{spec.Key}' must be {spec.Min}–{spec.Max}, {string.Join(", ", spec.Values)}.",
         };

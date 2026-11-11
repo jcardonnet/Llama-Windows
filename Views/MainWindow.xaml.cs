@@ -2027,6 +2027,29 @@ namespace LlamaApp.Views
             if (extras is null)
                 return new ModelExtraArgumentsSaveResult(false, false, null, "Settings are unavailable.");
 
+            // An alias is a router model name. Reject one that would collide
+            // with a model id or another model's alias before saving: the
+            // router refuses to load the whole preset on a conflict.
+            List<KeyValuePair<string, string>> snapshot;
+            lock (extras) snapshot = extras.ToList();
+            var otherOptions = new List<IReadOnlyList<ModelPresetOption>>();
+            foreach (var (id, otherText) in snapshot)
+            {
+                if (string.Equals(id, serverModelId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (ModelPresetOptions.TryParse(otherText, out var other, out _))
+                    otherOptions.Add(other);
+            }
+            var knownIds = new List<string>(_localByServerId.Keys);
+            knownIds.AddRange(snapshot.Select(kv => kv.Key));
+            var aliasConflicts = ModelPresetOptions.FindAliasConflicts(
+                serverModelId, options, knownIds, otherOptions);
+            if (aliasConflicts.Count > 0)
+            {
+                return new ModelExtraArgumentsSaveResult(false, false, null,
+                    "Alias already in use: " + string.Join(", ", aliasConflicts) +
+                    ". Aliases must be unique and can't match a model id.");
+            }
+
             string? previous = null;
             bool existed;
             lock (extras)

@@ -46,7 +46,7 @@ without any possibility that a hand-typed option bricks the server.
 - Per-model `cache-type-k`/`cache-type-v` (the app's global KV setting wins;
   verified) or `jinja` (app-owned).
 - Per-model `ctx-size`/`spec-type` (the context picker and draft-head detector
-  own them), model identity (`model`, `alias`, `hf*`, `mmproj`,
+  own them), model identity (`model`, `hf*`, `mmproj`,
   `spec-draft-model`), bind/auth (`host`, `port`, `api-key*`, `ssl*`), router
   lifecycle (`models-*`, `sleep-idle-seconds`), or path/log options
   (`log-file`, `slot-save-path`, ...).
@@ -93,6 +93,7 @@ Assigned by `App.OnLaunched` from `Settings.Current.ModelExtraArguments`
 | `threads-batch` | `tb` | int 1–256 |
 | `flash-attn` | `fa` | `on` / `off` / `auto` |
 | `special` | `sp` | `true` / `false` (bare flag = true); keeps special/control tokens in output — some lightonai models require it |
+| `alias` | `a` | one or more client-facing model names, comma-separated (max 128 chars each); requests may use these instead of the repo:quant id |
 | `batch-size` | `b` | int 1–8192 |
 | `ubatch-size` | `ub` | int 1–8192 |
 | `n-cpu-moe` | `ncmoe` | int 0–999 |
@@ -105,8 +106,16 @@ Assigned by `App.OnLaunched` from `Settings.Current.ModelExtraArguments`
 
 Not supported, with specific errors: `cache-type-k/v` ("set globally in
 Settings → Llama"), `ctx-size`/`c` ("use the Context length picker"),
-`spec-type` ("detected automatically"), `model`/`m`, `alias`/`a`, `hf*`/`hft`,
-`host`, `port`, `api-key*`, `ssl*`, `models-*`, `sleep-idle-seconds`.
+`spec-type` ("detected automatically"), `model`/`m`, `hf*`/`hft`, `host`,
+`port`, `api-key*`, `ssl*`, `models-*`, `sleep-idle-seconds`.
+
+`alias` is supported so a client's configured model name survives a repo or
+quant change. The router accepts requests addressed to any alias and reports
+the canonical id in the response; `/v1/models` still lists only canonical ids,
+so clients that validate the model list must use the canonical id. Aliases
+must not equal any model id or another model's alias — the router refuses to
+load the entire preset on a conflict. The save path reports such collisions,
+and the writer drops them as a last line of defense.
 
 `special` is deliberately per-model rather than a global default: it keeps the
 model's special/control tokens in the generated text (some lightonai models

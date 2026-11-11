@@ -30,6 +30,60 @@ public sealed class RenderPresetFileTests
         => Assert.Equal("", Render());
 
     [Fact]
+    public void Alias_IsRenderedIntoTheModelSection()
+    {
+        var ini = Render(extras: new Dictionary<string, string>
+        {
+            ["org/model:Q4_K_M"] = "alias = gpt-4o, my-model",
+        });
+
+        Assert.Equal(
+            "[org/model:Q4_K_M]\n" +
+            "alias = gpt-4o, my-model\n" +
+            "\n",
+            ini);
+    }
+
+    [Fact]
+    public void AliasCollidingWithAModelName_IsDropped()
+    {
+        var ini = Render(
+            extras: new Dictionary<string, string>
+            {
+                ["org/model:Q4_K_M"] = "alias = other/model:Q8_0",
+            },
+            serverModels:
+            [
+                new LlamaManager.ServerModel
+                {
+                    Id = "other/model:Q8_0",
+                    Source = "cache",
+                },
+            ]);
+
+        Assert.Equal("", ini);
+    }
+
+    [Fact]
+    public void DuplicateAliasAcrossModels_FirstCanonicalIdWins()
+    {
+        var ini = Render(extras: new Dictionary<string, string>
+        {
+            ["b/model:Q4_K_M"] = "alias = shared\nthreads = 8",
+            ["a/model:Q4_K_M"] = "alias = shared",
+        });
+
+        Assert.Equal(
+            "[a/model:Q4_K_M]\n" +
+            "alias = shared\n" +
+            "\n" +
+            "[b/model:Q4_K_M]\n" +
+            "threads = 8\n" +
+            "\n",
+            ini);
+    }
+
+    [Fact]
     public void WithoutExtrasAndEnrolled_IsByteIdenticalToTheOldRenderer()
     {
         var contexts = new Dictionary<string, int>

@@ -60,6 +60,49 @@ public sealed class ModelPresetOptionsTests
     }
 
     [Fact]
+    public void Alias_AcceptsSingleAndCommaSeparatedNames()
+    {
+        var options = Parse(
+            "alias = gpt-4o, my-model, meta-llama/Llama-3.1-8B-Instruct:Q4_K_M");
+
+        var only = Assert.Single(options);
+        Assert.Equal("alias", only.Key);
+        Assert.Equal(
+            "gpt-4o, my-model, meta-llama/Llama-3.1-8B-Instruct:Q4_K_M",
+            only.Value);
+    }
+
+    [Fact]
+    public void Alias_RejectsEmptyOrOverlongNames()
+    {
+        AssertInvalid("alias = ", "needs a value");
+        AssertInvalid("alias = foo,,bar", "non-empty");
+        AssertInvalid("alias = " + new string('x', 129), "128");
+    }
+
+    [Fact]
+    public void FindAliasConflicts_FlagsModelIdsAndOtherModelsAliases()
+    {
+        var conflicts = ModelPresetOptions.FindAliasConflicts(
+            "org/model:Q4_K_M",
+            Parse("alias = gpt-4o, my-model"),
+            ["gpt-4o", "org/model:Q4_K_M"],
+            [Parse("alias = my-model")]);
+
+        Assert.Equal(new[] { "gpt-4o", "my-model" }, conflicts);
+    }
+
+    [Fact]
+    public void FindAliasConflicts_AllowsUniqueAliases()
+    {
+        Assert.Empty(ModelPresetOptions.FindAliasConflicts(
+            "org/model:Q4_K_M",
+            Parse("alias = my-model"),
+            ["org/other:Q8_0"],
+            [Parse("alias = other-model")]));
+    }
+
+    [Fact]
     public void BlankAndCommentLines_AreIgnored()
     {
         var options = Parse("# comment\n; another\n\n  \nthreads = 8\n");
