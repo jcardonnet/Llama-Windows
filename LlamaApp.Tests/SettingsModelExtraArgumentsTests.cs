@@ -15,6 +15,7 @@ public sealed class SettingsModelExtraArgumentsTests
     public void DefaultsToEmpty()
     {
         Assert.Empty(new Settings().ModelExtraArguments);
+        Assert.Empty(new Settings().ModelAliases);
     }
 
     [Fact]
@@ -22,6 +23,7 @@ public sealed class SettingsModelExtraArgumentsTests
     {
         var settings = Settings.FromJson("""{"ServerPort":9931,"IdleUnloadSeconds":-1}""");
         Assert.Empty(settings.ModelExtraArguments);
+        Assert.Empty(settings.ModelAliases);
     }
 
     [Fact]
@@ -32,7 +34,8 @@ public sealed class SettingsModelExtraArgumentsTests
               "ModelContextLengths": null,
               "ModelSpeculativeTypes": null,
               "ModelFolders": null,
-              "ModelExtraArguments": null
+              "ModelExtraArguments": null,
+              "ModelAliases": null
             }
             """);
 
@@ -40,7 +43,9 @@ public sealed class SettingsModelExtraArgumentsTests
         Assert.NotNull(settings.ModelSpeculativeTypes);
         Assert.NotNull(settings.ModelFolders);
         Assert.NotNull(settings.ModelExtraArguments);
+        Assert.NotNull(settings.ModelAliases);
         Assert.Empty(settings.ModelExtraArguments);
+        Assert.Empty(settings.ModelAliases);
     }
 
     [Fact]
@@ -52,6 +57,10 @@ public sealed class SettingsModelExtraArgumentsTests
             {
                 ["org/repo:Q4_0"] = "n-gpu-layers = 20\r\n--flash-attn on",
             },
+            ModelAliases =
+            {
+                ["org/repo:Q4_0"] = "my-model, gpt-4o",
+            },
         };
 
         var json = JsonSerializer.Serialize(original, SettingsJsonContext.Default.Settings);
@@ -60,17 +69,21 @@ public sealed class SettingsModelExtraArgumentsTests
         Assert.Equal(
             "n-gpu-layers = 20\r\n--flash-attn on",
             loaded.ModelExtraArguments["org/repo:Q4_0"]);
+        Assert.Equal("my-model, gpt-4o", loaded.ModelAliases["org/repo:Q4_0"]);
     }
 
     [Fact]
-    public void Serialization_IncludesTheDictionary()
+    public void Serialization_IncludesTheDictionaries()
     {
         var settings = new Settings();
         settings.ModelExtraArguments["fam"] = "threads = 8";
+        settings.ModelAliases["fam"] = "my-model";
 
         var json = JsonSerializer.Serialize(settings, SettingsJsonContext.Default.Settings);
 
         Assert.Contains("\"ModelExtraArguments\"", json);
         Assert.Contains("threads = 8", json);
+        Assert.Contains("\"ModelAliases\"", json);
+        Assert.Contains("my-model", json);
     }
 }

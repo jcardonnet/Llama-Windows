@@ -17,13 +17,110 @@ public sealed class RenderPresetFileTests
         IReadOnlyDictionary<string, string>? specs = null,
         IReadOnlyDictionary<string, string>? extras = null,
         IReadOnlyList<EnrolledFolderModel>? enrolled = null,
-        IReadOnlyList<LlamaManager.ServerModel>? serverModels = null)
+        IReadOnlyList<LlamaManager.ServerModel>? serverModels = null,
+        IReadOnlyDictionary<string, string>? aliases = null)
         => LlamaManager.RenderPresetFile(
             (contexts ?? new Dictionary<string, int>()).ToList(),
             (specs ?? new Dictionary<string, string>()).ToList(),
             (extras ?? new Dictionary<string, string>()).ToList(),
             enrolled ?? [],
-            serverModels);
+            serverModels,
+            (aliases ?? new Dictionary<string, string>()).ToList());
+
+    [Fact]
+    public void DedicatedAlias_RendersInTheModelSection()
+    {
+        var ini = Render(aliases: new Dictionary<string, string>
+        {
+            ["org/model:Q4_K_M"] = "gpt-4o, my-model",
+        });
+
+        Assert.Equal(
+            "[org/model:Q4_K_M]\n" +
+            "alias = gpt-4o, my-model\n" +
+            "\n",
+            ini);
+    }
+
+    [Fact]
+    public void DedicatedAlias_TakesPrecedenceOverAnExtraAlias()
+    {
+        var ini = Render(
+            extras: new Dictionary<string, string>
+            {
+                ["org/model:Q4_K_M"] = "alias = legacy-name\nthreads = 8",
+            },
+            aliases: new Dictionary<string, string>
+            {
+                ["org/model:Q4_K_M"] = "client-name",
+            });
+
+        Assert.Equal(
+            "[org/model:Q4_K_M]\n" +
+            "threads = 8\n" +
+            "alias = client-name\n" +
+            "\n",
+            ini);
+    }
+
+    [Fact]
+    public void DedicatedAliasCollidingWithAModelName_IsDropped()
+    {
+        var ini = Render(
+            aliases: new Dictionary<string, string>
+            {
+                ["org/model:Q4_K_M"] = "other/model:Q8_0",
+            },
+            serverModels:
+            [
+                new LlamaManager.ServerModel
+                {
+                    Id = "other/model:Q8_0",
+                    Source = "cache",
+                },
+            ]);
+
+        Assert.Equal("", ini);
+    }
+
+    [Fact]
+    public void DuplicateDedicatedAlias_FirstCanonicalIdWins()
+    {
+        var ini = Render(aliases: new Dictionary<string, string>
+        {
+            ["b/model:Q4_K_M"] = "shared",
+            ["a/model:Q4_K_M"] = "shared",
+        });
+
+        Assert.Equal(
+            "[a/model:Q4_K_M]\n" +
+            "alias = shared\n" +
+            "\n",
+            ini);
+    }
+
+    [Fact]
+    public void DedicatedAlias_MergesIntoTheEnrolledSection()
+    {
+        var ini = Render(
+            enrolled:
+            [
+                new EnrolledFolderModel(
+                    "colgrep-agent-2B-Q8_0", @"D:\colgrep-agent-2B-Q8_0.gguf", null, null),
+            ],
+            aliases: new Dictionary<string, string>
+            {
+                ["colgrep-agent-2B-Q8_0"] = "my-colgrep",
+            });
+
+        Assert.Equal(
+            "[colgrep-agent-2B-Q8_0]\n" +
+            "model = D:\\colgrep-agent-2B-Q8_0.gguf\n" +
+            "alias = my-colgrep\n" +
+            "special = true\n" +
+            "\n",
+            ini);
+    }
 
     [Fact]
     public void NoInputs_RendersEmpty()

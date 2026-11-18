@@ -262,7 +262,8 @@ namespace LlamaApp
             // renders only allowlisted keys (an unknown preset key aborts the
             // router, so validation happens before the write).
             Llama.LlamaManager.Shared.ModelExtraArguments = Settings.Current.ModelExtraArguments;
-            Common.Log.Info($"per-model preset option entries: {Settings.Current.ModelExtraArguments.Count}");
+            Llama.LlamaManager.Shared.ModelAliases = Settings.Current.ModelAliases;
+            Common.Log.Info($"per-model preset option entries: {Settings.Current.ModelExtraArguments.Count}; aliases: {Settings.Current.ModelAliases.Count}");
             Common.Log.Info($"cache directory: {Settings.Current.CacheDirectory}");
             // Presence only — never log the token itself.
             Common.Log.Info($"HF token: {(string.IsNullOrWhiteSpace(Settings.Current.HuggingFaceToken) ? "not set" : "configured")}");

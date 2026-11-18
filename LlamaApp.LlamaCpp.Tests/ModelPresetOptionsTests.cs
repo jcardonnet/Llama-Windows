@@ -81,6 +81,30 @@ public sealed class ModelPresetOptionsTests
     }
 
     [Fact]
+    public void TryNormalizeAlias_NormalizesTheDedicatedField()
+    {
+        Assert.True(ModelPresetOptions.TryNormalizeAlias(
+            "  gpt-4o, my model  ", out var value, out var error), error);
+        Assert.Equal("gpt-4o, my model", value);
+
+        Assert.False(ModelPresetOptions.TryNormalizeAlias("", out _, out var empty));
+        Assert.Contains("empty", empty, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ModelPresetOptions.TryNormalizeAlias("foo,,bar", out _, out _));
+    }
+
+    [Fact]
+    public void FindAliasConflicts_WorksForTheDedicatedField()
+    {
+        var conflicts = ModelPresetOptions.FindAliasConflicts(
+            "org/model:Q4_K_M",
+            ["my-model", "gpt-4o"],
+            ["gpt-4o", "org/model:Q4_K_M"],
+            ["my-model"]);
+
+        Assert.Equal(new[] { "my-model", "gpt-4o" }, conflicts);
+    }
+
+    [Fact]
     public void FindAliasConflicts_FlagsModelIdsAndOtherModelsAliases()
     {
         var conflicts = ModelPresetOptions.FindAliasConflicts(

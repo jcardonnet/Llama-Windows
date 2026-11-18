@@ -1814,7 +1814,7 @@ namespace LlamaApp.Views
 
             try
             {
-                if (_detailsViewModel?.HasUnsavedExtraArguments == true)
+                if (_detailsViewModel?.HasUnsavedOptions == true)
                 {
                     _hideDetailsPromptOpen = true;
                     try
@@ -1862,13 +1862,13 @@ namespace LlamaApp.Views
                     {
                         new TextBlock
                         {
-                            Text = "Discard unsaved extra options?",
+                            Text = "Discard unsaved per-model settings?",
                             FontSize = 13,
                             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                         },
                         new TextBlock
                         {
-                            Text = "The text in Extra preset options hasn't been saved.",
+                            Text = "The client alias or extra preset options haven't been saved.",
                             FontSize = 12,
                             Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
                             TextWrapping = TextWrapping.Wrap,
@@ -2015,34 +2015,72 @@ namespace LlamaApp.Views
                 return extras.TryGetValue(serverModelId, out var text) ? text : "";
         }
 
+        string IModelItemDetailsHost.GetModelAlias(string serverModelId)
+        {
+            var aliases = Settings.Current.ModelAliases;
+            if (aliases is null) return "";
+            lock (aliases)
+                return aliases.TryGetValue(serverModelId, out var text) ? text : "";
+        }
+
         async Task<ModelExtraArgumentsSaveResult> IModelItemDetailsHost.SaveModelExtraArgumentsAsync(
-            string serverModelId, string arguments)
+            string serverModelId, string arguments, string alias)
         {
             var text = arguments.Trim();
             if (!ModelPresetOptions.TryParse(text, out var options, out var errors))
                 return new ModelExtraArgumentsSaveResult(false, false, null,
                     ModelPresetOptions.FormatError(errors[0]));
 
+            var aliasText = alias.Trim();
+            var normalizedAlias = "";
+            if (aliasText.Length > 0 &&
+                !ModelPresetOptions.TryNormalizeAlias(aliasText, out normalizedAlias, out var aliasError))
+            {
+                return new ModelExtraArgumentsSaveResult(false, false, null, aliasError);
+            }
+
             var extras = Settings.Current.ModelExtraArguments;
-            if (extras is null)
+            var aliases = Settings.Current.ModelAliases;
+            if (extras is null || aliases is null)
                 return new ModelExtraArgumentsSaveResult(false, false, null, "Settings are unavailable.");
 
-            // An alias is a router model name. Reject one that would collide
-            // with a model id or another model's alias before saving: the
-            // router refuses to load the whole preset on a conflict.
-            List<KeyValuePair<string, string>> snapshot;
-            lock (extras) snapshot = extras.ToList();
+            List<KeyValuePair<string, string>> extrasSnapshot;
+            lock (extras) extrasSnapshot = extras.ToList();
+            List<KeyValuePair<string, string>> aliasesSnapshot;
+            lock (aliases) aliasesSnapshot = aliases.ToList();
+
+            // The Client alias field is the model's router name; reject one that
+            // would collide with a model id or another model's alias before
+            // saving. The router refuses to load the whole preset on a conflict.
+            // Dedicated aliases win over any `alias =` left in extra options.
+            var effectiveOptions = options
+                .Where(o => !string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (normalizedAlias.Length > 0)
+                effectiveOptions.Add(new ModelPresetOption("alias", normalizedAlias));
+
             var otherOptions = new List<IReadOnlyList<ModelPresetOption>>();
-            foreach (var (id, otherText) in snapshot)
+            foreach (var (id, otherText) in extrasSnapshot)
             {
                 if (string.Equals(id, serverModelId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (aliasesSnapshot.Any(kv =>
+                        string.Equals(kv.Key, id, StringComparison.OrdinalIgnoreCase)))
+                    continue; // that model's dedicated alias is the effective one
                 if (ModelPresetOptions.TryParse(otherText, out var other, out _))
                     otherOptions.Add(other);
             }
+            foreach (var (id, otherAlias) in aliasesSnapshot)
+            {
+                if (string.Equals(id, serverModelId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (ModelPresetOptions.TryNormalizeAlias(otherAlias, out var normalized, out _))
+                    otherOptions.Add([new ModelPresetOption("alias", normalized)]);
+            }
+
             var knownIds = new List<string>(_localByServerId.Keys);
-            knownIds.AddRange(snapshot.Select(kv => kv.Key));
+            knownIds.AddRange(extrasSnapshot.Select(kv => kv.Key));
+            knownIds.AddRange(aliasesSnapshot.Select(kv => kv.Key));
             var aliasConflicts = ModelPresetOptions.FindAliasConflicts(
-                serverModelId, options, knownIds, otherOptions);
+                serverModelId, effectiveOptions, knownIds, otherOptions);
             if (aliasConflicts.Count > 0)
             {
                 return new ModelExtraArgumentsSaveResult(false, false, null,
@@ -2059,14 +2097,28 @@ namespace LlamaApp.Views
                 else extras[serverModelId] = text;
             }
 
+            string? previousAlias = null;
+            bool aliasExisted;
+            lock (aliases)
+            {
+                aliasExisted = aliases.TryGetValue(serverModelId, out previousAlias);
+                if (normalizedAlias.Length == 0) aliases.Remove(serverModelId);
+                else aliases[serverModelId] = normalizedAlias;
+            }
+
             if (!Settings.Current.Save())
             {
                 // Keep memory and disk in sync: a failed Save must not leave the
-                // live dictionary (shared with the renderer) holding the edit.
+                // live dictionaries (shared with the renderer) holding the edit.
                 lock (extras)
                 {
                     if (existed) extras[serverModelId] = previous!;
                     else extras.Remove(serverModelId);
+                }
+                lock (aliases)
+                {
+                    if (aliasExisted) aliases[serverModelId] = previousAlias!;
+                    else aliases.Remove(serverModelId);
                 }
                 return new ModelExtraArgumentsSaveResult(false, false, null,
                     "Could not save settings.");
@@ -2078,7 +2130,7 @@ namespace LlamaApp.Views
                 : "Saved, but the running server did not reload its presets. Restart the server to apply them.";
 
             var conflicts = ModelPresetOptions.FindGlobalConflicts(
-                Settings.Current.CustomServeArguments, options);
+                Settings.Current.CustomServeArguments, effectiveOptions);
             if (conflicts.Count > 0)
             {
                 var conflict = "Also set in Custom serve arguments (the global value wins): " +
@@ -2086,7 +2138,8 @@ namespace LlamaApp.Views
                 warning = warning is null ? conflict : warning + " " + conflict;
             }
 
-            Log.Info($"per-model preset options for '{serverModelId}': {(text.Length == 0 ? "cleared" : "saved")}");
+            Log.Info($"per-model settings for '{serverModelId}': options {(text.Length == 0 ? "cleared" : "saved")}, " +
+                     $"alias {(normalizedAlias.Length == 0 ? "cleared" : "saved")}");
             return new ModelExtraArgumentsSaveResult(true, reloaded, warning, null);
         }
 

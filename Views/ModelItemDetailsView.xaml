@@ -238,7 +238,7 @@
                       Visibility="{x:Bind ViewModel.ExtraArgumentsVisible, Mode=OneWay}">
                 <Expander.Header>
                     <StackPanel Orientation="Horizontal" Spacing="6">
-                        <TextBlock Text="Extra preset options"
+                        <TextBlock Text="Client alias &amp; preset options"
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -246,7 +246,7 @@
                         <Ellipse Width="6" Height="6"
                                  Fill="{ThemeResource AccentFillColorDefaultBrush}"
                                  VerticalAlignment="Center"
-                                 Visibility="{x:Bind ViewModel.HasConfiguredExtraArguments, Mode=OneWay}" />
+                                 Visibility="{x:Bind ViewModel.HasConfiguredOptions, Mode=OneWay}" />
                         <Button Padding="2,0"
                                 MinWidth="0" MinHeight="0"
                                 Background="Transparent"
@@ -276,6 +276,28 @@
                 </Expander.Header>
 
                 <StackPanel Spacing="6">
+                    <TextBlock Text="Client alias"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox x:Name="AliasBox"
+                             Text="{x:Bind ViewModel.Alias, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             IsEnabled="{x:Bind ViewModel.ExtraArgumentsEnabled, Mode=OneWay}"
+                             FontSize="12"
+                             IsSpellCheckEnabled="False"
+                             PlaceholderText="e.g. my-model, gpt-4o"
+                             AutomationProperties.Name="Client alias"
+                             AutomationProperties.HelpText="Clients may send this name in the OpenAI model field. Comma-separate multiple names." />
+                    <TextBlock Text="Clients may send this name in the model field. Comma-separate several; /v1/models still lists the canonical id."
+                               FontSize="11"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+
+                    <TextBlock Text="Extra preset options"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Margin="0,4,0,0" />
                     <TextBox x:Name="ExtraArgumentsBox"
                              Text="{x:Bind ViewModel.ExtraArguments, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              IsEnabled="{x:Bind ViewModel.ExtraArgumentsEnabled, Mode=OneWay}"
@@ -291,7 +313,7 @@
                              AutomationProperties.Name="Extra preset options"
                              AutomationProperties.HelpText="One curated llama.cpp option per line, key = value or --key value. Applies when the model next loads." />
 
-                    <TextBlock Text="One option per line. Curated set — open the info button for the list. Use alias = my-model to give clients a stable model name. Applies when this model next loads."
+                    <TextBlock Text="One option per line. Curated set — open the info button for the list. Applies when this model next loads."
                                FontSize="11"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap" />
@@ -313,7 +335,7 @@
                                 IsEnabled="{x:Bind ViewModel.CanSaveExtraArguments, Mode=OneWay}"
                                 Padding="10,4"
                                 FontSize="12"
-                                AutomationProperties.Name="Save extra preset options for this model" />
+                                AutomationProperties.Name="Save per-model settings" />
                         <TextBlock Grid.Column="1"
                                    Text="{x:Bind ViewModel.ExtraArgumentsSaveMessage, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.HasExtraArgumentsSaveMessage, Mode=OneWay}"

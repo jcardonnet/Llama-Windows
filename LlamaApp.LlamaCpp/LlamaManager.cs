@@ -552,6 +552,16 @@ public sealed class LlamaManager
     /// </summary>
     public IReadOnlyDictionary<string, string>? ModelExtraArguments { get; set; }
 
+    /// <summary>
+    /// Client-facing model aliases keyed by the same server model id as
+    /// <see cref="ModelExtraArguments"/>. Snapshotted under its lock by
+    /// <see cref="WriteContextPresetsIniAsync"/> and rendered as one
+    /// <c>alias = name1, name2</c> line per section. The router routes requests
+    /// addressed to an alias to the canonical model; <c>/models</c> keeps the
+    /// canonical id. Only affects servers the app launches.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? ModelAliases { get; set; }
+
     private Process? _serverProcess;
 
     // Single-flight guard for EnsureLlamaOrDownloadAsync / StartServerAsync. Called
@@ -1688,7 +1698,8 @@ public sealed class LlamaManager
         IReadOnlyList<KeyValuePair<string, string>>? speculativeTypes,
         IReadOnlyList<KeyValuePair<string, string>>? extraArguments,
         IReadOnlyList<EnrolledFolderModel>? enrolledModels,
-        IReadOnlyList<ServerModel>? serverModels = null)
+        IReadOnlyList<ServerModel>? serverModels = null,
+        IReadOnlyList<KeyValuePair<string, string>>? modelAliases = null)
     {
         var sections = new Dictionary<string, PresetSection>(PresetIniSyntax.SectionComparer);
         var appOrder = new List<PresetSection>();
@@ -1816,14 +1827,66 @@ public sealed class LlamaManager
         if (extraArguments is not null)
             foreach (var (id, _) in extraArguments)
                 knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(id));
+        if (modelAliases is not null)
+            foreach (var (id, _) in modelAliases)
+                knownModelIds.Add(PresetIniSyntax.CanonicalSectionId(id));
 
         var aliasOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var dedicatedAliases = new SortedDictionary<string, string>(PresetIniSyntax.SectionComparer);
+        if (modelAliases is not null)
+        {
+            var entries = modelAliases
+                .Select(kv => (kv.Key, Canonical: PresetIniSyntax.CanonicalSectionId(kv.Key), kv.Value))
+                .OrderBy(e => e.Canonical, PresetIniSyntax.SectionComparer)
+                .ToList();
+            foreach (var (id, canonical, text) in entries)
+            {
+                if (!PresetIniSyntax.IsSafeSectionId(canonical)) continue;
+                if (!ModelPresetOptions.TryNormalizeAlias(text, out var normalized, out var error))
+                {
+                    Log.Warn($"model alias for '{id}' is invalid and was not rendered: {error}");
+                    continue;
+                }
+
+                var kept = new List<string>();
+                foreach (var alias in normalized.Split(
+                             ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (knownModelIds.Contains(alias))
+                    {
+                        Log.Warn($"model alias '{alias}' for '{id}' collides with a model name; skipped");
+                        continue;
+                    }
+                    if (aliasOwners.TryGetValue(alias, out var owner) &&
+                        !string.Equals(owner, canonical, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log.Warn($"model alias '{alias}' for '{id}' is already used by '{owner}'; skipped");
+                        continue;
+                    }
+                    if (!kept.Contains(alias, StringComparer.OrdinalIgnoreCase))
+                    {
+                        aliasOwners[alias] = canonical;
+                        kept.Add(alias);
+                    }
+                }
+                if (kept.Count > 0)
+                    dedicatedAliases[canonical] = string.Join(", ", kept);
+            }
+        }
+
         IReadOnlyList<ModelPresetOption> FilterAliases(
-            string id, IReadOnlyList<ModelPresetOption> options)
+            string id, string canonical, IReadOnlyList<ModelPresetOption> options)
         {
             var aliasOption = options.FirstOrDefault(o =>
                 string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase));
             if (string.IsNullOrEmpty(aliasOption.Key)) return options;
+
+            // The dedicated Client alias field owns the name; an `alias =`
+            // line left in the advanced options is ignored for that model.
+            var filtered = options
+                .Where(o => !string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (dedicatedAliases.ContainsKey(canonical)) return filtered;
 
             var kept = new List<string>();
             foreach (var raw in aliasOption.Value.Split(
@@ -1837,21 +1900,18 @@ public sealed class LlamaManager
                     continue;
                 }
                 if (aliasOwners.TryGetValue(alias, out var owner) &&
-                    !string.Equals(owner, id, StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(owner, canonical, StringComparison.OrdinalIgnoreCase))
                 {
                     Log.Warn($"preset alias '{alias}' for '{id}' is already used by '{owner}'; skipped");
                     continue;
                 }
                 if (!kept.Contains(alias, StringComparer.OrdinalIgnoreCase))
                 {
-                    aliasOwners[alias] = id;
+                    aliasOwners[alias] = canonical;
                     kept.Add(alias);
                 }
             }
 
-            var filtered = options
-                .Where(o => !string.Equals(o.Key, "alias", StringComparison.OrdinalIgnoreCase))
-                .ToList();
             if (kept.Count > 0)
                 filtered.Add(new ModelPresetOption("alias", string.Join(", ", kept)));
             return filtered;
@@ -1883,7 +1943,7 @@ public sealed class LlamaManager
             parsed.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Canonical, b.Canonical));
             foreach (var (id, canonical, parsedOptions) in parsed)
             {
-                var options = FilterAliases(id, parsedOptions);
+                var options = FilterAliases(id, canonical, parsedOptions);
                 if (options.Count == 0) continue;
 
                 if (!explicitKeys.TryGetValue(canonical, out var keys))
@@ -1900,6 +1960,19 @@ public sealed class LlamaManager
                 if (!existed && !section.Enrolled)
                     extrasOnly.Add(section);
             }
+        }
+
+        // Dedicated client aliases: add the surviving names to the model's
+        // section (creating an alias-only section when it has no other
+        // settings). Extra `alias =` options were already ignored above when
+        // the dedicated field owns the model.
+        foreach (var (canonical, aliasText) in dedicatedAliases)
+        {
+            var existed = sections.ContainsKey(canonical);
+            var section = GetSection(canonical, enrolled: false);
+            AddOption(section, new ModelPresetOption("alias", aliasText));
+            if (!existed && !section.Enrolled)
+                extrasOnly.Add(section);
         }
 
         // Family defaults (e.g. colgrep-agent needs `special`). Applied after
@@ -2019,6 +2092,9 @@ public sealed class LlamaManager
             var extras = ModelExtraArguments;
             var extraItems = new List<KeyValuePair<string, string>>();
             if (extras is not null) lock (extras) extraItems.AddRange(extras);
+            var aliases = ModelAliases;
+            var aliasItems = new List<KeyValuePair<string, string>>();
+            if (aliases is not null) lock (aliases) aliasItems.AddRange(aliases);
 
             // Enrolled model folders (Settings → General → Model folders): a
             // recursive scan is disk I/O, so it runs off the caller's thread —
@@ -2056,7 +2132,8 @@ public sealed class LlamaManager
             contextItems = FilterExistingModels(contextItems, IsBusy, Exists);
             specItems = FilterExistingModels(specItems, IsBusy, Exists);
             extraItems = FilterExistingModels(extraItems, IsBusy, Exists);
-            Log.Info($"per-model preset options: {extraItems.Count} configured");
+            aliasItems = FilterExistingModels(aliasItems, IsBusy, Exists);
+            Log.Info($"per-model preset options: {extraItems.Count} configured; aliases: {aliasItems.Count}");
 
             // Invalid entries never reach the INI (an unknown key aborts the
             // whole router). Log the model id and the first error only — the
@@ -2076,7 +2153,7 @@ public sealed class LlamaManager
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(ContextPresetPath)!);
                 File.WriteAllText(ContextPresetPath,
-                    RenderPresetFile(contextItems, specItems, extraItems, enrolled, LastModelsSnapshot));
+                    RenderPresetFile(contextItems, specItems, extraItems, enrolled, LastModelsSnapshot, aliasItems));
                 if (invalidExtras > 0)
                     Log.Warn($"{invalidExtras} model(s) have invalid per-model preset options; not rendered");
                 return ContextPresetPath;

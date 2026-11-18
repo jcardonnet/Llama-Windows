@@ -110,9 +110,12 @@ Settings → Llama"), `ctx-size`/`c` ("use the Context length picker"),
 `port`, `api-key*`, `ssl*`, `models-*`, `sleep-idle-seconds`.
 
 `alias` is supported so a client's configured model name survives a repo or
-quant change. The router accepts requests addressed to any alias and reports
-the canonical id in the response; `/v1/models` still lists only canonical ids,
-so clients that validate the model list must use the canonical id. Aliases
+quant change. The model details view has a dedicated **Client alias** field
+(persisted in `Settings.ModelAliases` and saved with the extra options); an
+`alias =` line in the advanced options remains accepted for compatibility, but
+the dedicated field wins. The router accepts requests addressed to any alias and
+reports the canonical id in the response; `/v1/models` still lists only canonical
+ids, so clients that validate the model list must use the canonical id. Aliases
 must not equal any model id or another model's alias — the router refuses to
 load the entire preset on a conflict. The save path reports such collisions,
 and the writer drops them as a last line of defense.

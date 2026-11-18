@@ -71,6 +71,10 @@ public static class ModelPresetOptions
     public const int MaxLineChars = 512;
     public const int MaxValueChars = 64;
 
+    private static readonly ModelPresetSpec AliasSpec =
+        new("alias", ["a"], ModelPresetValueKind.String, 0, 256, [],
+            "client-facing model name(s); comma-separated; requests may use these instead of the repo:quant id");
+
     private static readonly ModelPresetSpec[] Specs =
     [
         new("n-gpu-layers", ["ngl", "gpu-layers"], ModelPresetValueKind.IntegerOrEnum, 0, 999, ["auto", "all"]),
@@ -79,8 +83,7 @@ public static class ModelPresetOptions
         new("flash-attn", ["fa"], ModelPresetValueKind.Enum, 0, 0, ["on", "off", "auto"]),
         new("special", ["sp"], ModelPresetValueKind.Boolean, 0, 0, ["true", "false"],
             "keeps special/control tokens in generated text (debugging)"),
-        new("alias", ["a"], ModelPresetValueKind.String, 0, 256, [],
-            "client-facing model name(s); comma-separated; requests may use these instead of the repo:quant id"),
+        AliasSpec,
         new("batch-size", ["b"], ModelPresetValueKind.Integer, 1, 8192, []),
         new("ubatch-size", ["ub"], ModelPresetValueKind.Integer, 1, 8192, []),
         new("n-cpu-moe", ["ncmoe"], ModelPresetValueKind.Integer, 0, 999, []),
@@ -289,6 +292,24 @@ public static class ModelPresetOptions
     }
 
     /// <summary>
+    /// Normalizes the dedicated alias field's text (one or more comma-separated
+    /// names) with the same rules as the <c>alias</c> preset option. Empty text
+    /// is rejected; callers treat an empty field as "clear the alias".
+    /// </summary>
+    public static bool TryNormalizeAlias(
+        string? text, out string value, out string error)
+    {
+        value = "";
+        error = "";
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            error = "Alias can't be empty.";
+            return false;
+        }
+        return TryNormalizeValue(AliasSpec, text, out value, out error);
+    }
+
+    /// <summary>
     /// Aliases in <paramref name="options"/> that may not be used: they equal
     /// a known model id (including <paramref name="modelId"/>) or an alias
     /// already claimed by another model. Used by the save path; the INI writer
@@ -299,16 +320,28 @@ public static class ModelPresetOptions
         IReadOnlyList<ModelPresetOption> options,
         IEnumerable<string> modelIds,
         IEnumerable<IReadOnlyList<ModelPresetOption>> otherOptions)
+        => FindAliasConflicts(
+            modelId,
+            AliasesOf(options),
+            modelIds,
+            otherOptions.SelectMany(AliasesOf));
+
+    /// <summary>
+    /// <see cref="FindAliasConflicts(string, IReadOnlyList{ModelPresetOption}, IEnumerable{string}, IEnumerable{IReadOnlyList{ModelPresetOption}})"/>
+    /// for the dedicated alias field and other models' saved aliases.
+    /// </summary>
+    public static IReadOnlyList<string> FindAliasConflicts(
+        string modelId,
+        IReadOnlyList<string> aliases,
+        IEnumerable<string> modelIds,
+        IEnumerable<string> otherAliases)
     {
-        var aliases = AliasesOf(options);
         if (aliases.Count == 0) return [];
 
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { modelId };
         foreach (var id in modelIds) ids.Add(id);
 
-        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var others in otherOptions)
-            foreach (var alias in AliasesOf(others)) claimed.Add(alias);
+        var claimed = new HashSet<string>(otherAliases, StringComparer.OrdinalIgnoreCase);
 
         return aliases
             .Where(alias => ids.Contains(alias) || claimed.Contains(alias))

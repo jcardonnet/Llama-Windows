@@ -32,7 +32,9 @@ public sealed class ModelItemDetailsViewModelTests
         public List<ModelItem> Deletes { get; } = [];
         public int CloseDetailsCalls;
         public Dictionary<string, string> ExtraArguments { get; } = [];
+        public Dictionary<string, string> Aliases { get; } = [];
         public List<(string Id, string Text)> SavedExtraArguments { get; } = [];
+        public List<(string Id, string Alias)> SavedAliases { get; } = [];
         public ModelExtraArgumentsSaveResult ExtraResult { get; set; } = new(true, true, null, null);
 
         public Task LoadModelAsync(ModelItem model) { Loads.Add(model); return Task.CompletedTask; }
@@ -45,14 +47,20 @@ public sealed class ModelItemDetailsViewModelTests
         public string GetModelExtraArguments(string serverModelId)
             => ExtraArguments.TryGetValue(serverModelId, out var text) ? text : "";
 
+        public string GetModelAlias(string serverModelId)
+            => Aliases.TryGetValue(serverModelId, out var text) ? text : "";
+
         public Task<ModelExtraArgumentsSaveResult> SaveModelExtraArgumentsAsync(
-            string serverModelId, string arguments)
+            string serverModelId, string arguments, string alias)
         {
             SavedExtraArguments.Add((serverModelId, arguments));
+            SavedAliases.Add((serverModelId, alias));
             if (ExtraResult.Saved)
             {
                 if (arguments.Length == 0) ExtraArguments.Remove(serverModelId);
                 else ExtraArguments[serverModelId] = arguments;
+                if (alias.Length == 0) Aliases.Remove(serverModelId);
+                else Aliases[serverModelId] = alias;
             }
             return Task.FromResult(ExtraResult);
         }
@@ -716,6 +724,65 @@ public sealed class ModelItemDetailsViewModelTests
         Assert.False(vm.CanSaveExtraArguments);
         Assert.False(vm.HasExtraArgumentsError);
         Assert.Contains("n-gpu-layers", vm.SupportedOptionsText);
+    }
+
+    [Fact]
+    public async Task Alias_SavesWithTheOptionsAndUpdatesBaseline()
+    {
+        var host = new FakeHost();
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        vm.Alias = "gpt-4o, my-model";
+        vm.ExtraArguments = "threads = 8";
+        Assert.True(vm.HasUnsavedAlias);
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Equal(new[] { (InstalledId, "threads = 8") }, host.SavedExtraArguments);
+        Assert.Equal(new[] { (InstalledId, "gpt-4o, my-model") }, host.SavedAliases);
+        Assert.Equal("gpt-4o, my-model", host.Aliases[InstalledId]);
+        Assert.True(vm.HasConfiguredAlias);
+        Assert.True(vm.HasConfiguredOptions);
+        Assert.False(vm.HasUnsavedAlias);
+        Assert.False(vm.HasUnsavedOptions);
+        Assert.False(vm.CanSaveExtraArguments);
+    }
+
+    [Fact]
+    public async Task Alias_Invalid_DoesNotCallHost()
+    {
+        var host = new FakeHost();
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        vm.Alias = "foo,,bar";
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.False(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Empty(host.SavedAliases);
+        Assert.True(vm.HasExtraArgumentsError);
+        Assert.Contains("non-empty", vm.ExtraArgumentsError);
+        Assert.True(vm.HasUnsavedAlias);
+    }
+
+    [Fact]
+    public async Task Alias_ClearingRemovesTheEntry()
+    {
+        var host = new FakeHost();
+        host.Aliases[InstalledId] = "my-model";
+        var vm = MakeVm(InstalledItem(), host, new FakePreferences());
+
+        Assert.True(vm.HasConfiguredAlias);
+        vm.Alias = "";
+        Assert.True(vm.CanSaveExtraArguments);
+
+        Assert.True(await vm.SaveExtraArgumentsAsync());
+
+        Assert.Equal(new[] { (InstalledId, "") }, host.SavedAliases);
+        Assert.False(host.Aliases.ContainsKey(InstalledId));
+        Assert.False(vm.HasConfiguredAlias);
+        Assert.False(vm.HasUnsavedAlias);
     }
 
     [Fact]

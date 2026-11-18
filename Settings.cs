@@ -251,6 +251,19 @@ public sealed class Settings
     /// </summary>
     public Dictionary<string, string> ModelExtraArguments { get; set; } = new();
 
+    /// <summary>
+    /// Client-facing model aliases keyed by the server model id (or enrolled
+    /// section name). The value is the raw field text the user typed in the
+    /// model details view: one or more comma-separated names, normalized and
+    /// collision-checked by <see cref="Common.ModelPresetOptions"/> before it is
+    /// stored. Rendered as one <c>alias = name1, name2</c> line in the model's
+    /// preset section; the router accepts requests addressed to any alias while
+    /// <c>/models</c> keeps the canonical id. Shared by reference with
+    /// <see cref="Llama.LlamaManager"/> (<see cref="Llama.LlamaManager.ModelAliases"/>),
+    /// so the save path and the renderer must mutate/snapshot it under its lock.
+    /// </summary>
+    public Dictionary<string, string> ModelAliases { get; set; } = new();
+
     private static Settings Load()
     {
         try
@@ -290,6 +303,7 @@ public sealed class Settings
         s.ModelSpeculativeTypes ??= new();
         s.ModelFolders ??= [];
         s.ModelExtraArguments ??= new();
+        s.ModelAliases ??= new();
     }
 
     /// <summary>
@@ -385,6 +399,7 @@ public sealed class Settings
             lock (ModelSpeculativeTypes)
             lock (ModelFolders)
             lock (ModelExtraArguments)
+            lock (ModelAliases)
                 json = JsonSerializer.Serialize(this, SettingsJsonContext.Default.Settings);
             File.WriteAllText(SettingsPath, json);
             return true;

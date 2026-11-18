@@ -78,13 +78,18 @@ public interface IModelItemDetailsHost
     /// <summary>The saved curated preset-options text for the model ("" when unset).</summary>
     string GetModelExtraArguments(string serverModelId);
 
+    /// <summary>The saved client alias text for the model ("" when unset).</summary>
+    string GetModelAlias(string serverModelId);
+
     /// <summary>
     /// Validates, persists, re-renders the app preset INI and asks the running
-    /// server to reload it. Returns a result the view can surface; never throws
-    /// for expected validation/save failures.
+    /// server to reload it. <paramref name="alias"/> is the dedicated Client
+    /// alias field (empty clears it); both values are saved together. Returns a
+    /// result the view can surface; never throws for expected validation/save
+    /// failures.
     /// </summary>
     Task<ModelExtraArgumentsSaveResult> SaveModelExtraArgumentsAsync(
-        string serverModelId, string arguments);
+        string serverModelId, string arguments, string alias);
 }
 
 /// <summary>
@@ -128,6 +133,8 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     private bool _openChatWhenLoaded;
     private string _extraArguments = "";
     private string _savedExtraArguments = "";
+    private string _alias = "";
+    private string _savedAlias = "";
     private string? _extraArgumentsError;
     private string? _extraArgumentsMessage;
     private bool _isSavingExtraArguments;
@@ -153,11 +160,17 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         _dispatchToUi = dispatchToUi;
 
         _extraArguments = _savedExtraArguments = host.GetModelExtraArguments(ServerModelId);
+        _alias = _savedAlias = host.GetModelAlias(ServerModelId);
         if (!string.IsNullOrWhiteSpace(_savedExtraArguments) &&
             !ModelPresetOptions.TryParse(_savedExtraArguments, out _, out var savedErrors))
         {
             _extraArgumentsError =
                 "Saved options are invalid: " + ModelPresetOptions.FormatError(savedErrors[0]);
+        }
+        else if (!string.IsNullOrWhiteSpace(_savedAlias) &&
+                 !ModelPresetOptions.TryNormalizeAlias(_savedAlias, out _, out var aliasError))
+        {
+            _extraArgumentsError = "Saved alias is invalid: " + aliasError;
         }
 
         // Live state sync: the shared ModelItem already reflects every server
@@ -320,14 +333,40 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         }
     }
 
+    /// <summary>
+    /// The dedicated client-facing alias field: one or more comma-separated
+    /// names clients may put in the OpenAI <c>model</c> field.
+    /// </summary>
+    public string Alias
+    {
+        get => _alias;
+        set
+        {
+            var next = value ?? "";
+            if (string.Equals(_alias, next, StringComparison.Ordinal)) return;
+            _alias = next;
+            _extraArgumentsError = null;
+            _extraArgumentsMessage = null;
+            OnPropertyChanged();
+            NotifyExtraArguments();
+        }
+    }
+
     /// <summary>True when the field differs from what is persisted.</summary>
     public bool HasUnsavedExtraArguments =>
         !string.Equals(ExtraArguments.Trim(), _savedExtraArguments, StringComparison.Ordinal);
 
+    /// <summary>True when the alias field differs from what is persisted.</summary>
+    public bool HasUnsavedAlias =>
+        !string.Equals(Alias.Trim(), _savedAlias, StringComparison.Ordinal);
+
+    /// <summary>True when either per-model field has unsaved changes.</summary>
+    public bool HasUnsavedOptions => HasUnsavedExtraArguments || HasUnsavedAlias;
+
     /// <summary>The Save button: only a valid, dirty, idle model can be saved.</summary>
     public bool CanSaveExtraArguments =>
         ExtraArgumentsVisible && ExtraArgumentsEnabled &&
-        !_isSavingExtraArguments && HasUnsavedExtraArguments;
+        !_isSavingExtraArguments && HasUnsavedOptions;
 
     /// <summary>Line-addressed validation/save error ("" when none).</summary>
     public string ExtraArgumentsError => _extraArgumentsError ?? "";
@@ -340,8 +379,11 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     /// <summary>True when the saved text should be applied after a reload, not now.</summary>
     public bool ExtraArgumentsAppliesOnReload => Model.IsLoaded;
 
-    /// <summary>Header dot: a saved configuration exists.</summary>
+    /// <summary>Header dot: a saved alias or extra-options configuration exists.</summary>
     public bool HasConfiguredExtraArguments => !string.IsNullOrEmpty(_savedExtraArguments);
+    public bool HasConfiguredAlias => !string.IsNullOrEmpty(_savedAlias);
+    public bool HasConfiguredOptions =>
+        !string.IsNullOrEmpty(_savedExtraArguments) || !string.IsNullOrEmpty(_savedAlias);
 
     public bool IsSavingExtraArguments => _isSavingExtraArguments;
 
@@ -349,7 +391,7 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     /// True when saving would reload the preset and therefore unload the
     /// running model; the view asks for confirmation before calling Save.
     /// </summary>
-    public bool RequiresUnloadConfirmation => HasUnsavedExtraArguments && Model.IsLoaded;
+    public bool RequiresUnloadConfirmation => HasUnsavedOptions && Model.IsLoaded;
 
     /// <summary>
     /// Validates the text with the shared checker, persists it through the
@@ -369,33 +411,48 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
             return false;
         }
 
+        var aliasText = Alias.Trim();
+        var normalizedAlias = "";
+        if (aliasText.Length > 0 &&
+            !ModelPresetOptions.TryNormalizeAlias(aliasText, out normalizedAlias, out var aliasError))
+        {
+            _extraArgumentsError = aliasError;
+            _extraArgumentsMessage = null;
+            NotifyExtraArguments();
+            return false;
+        }
+
         _isSavingExtraArguments = true;
         _extraArgumentsError = null;
         _extraArgumentsMessage = null;
         NotifyExtraArguments();
         try
         {
-            var result = await _host.SaveModelExtraArgumentsAsync(ServerModelId, text);
+            var result = await _host.SaveModelExtraArgumentsAsync(
+                ServerModelId, text, normalizedAlias);
             if (!result.Saved)
             {
-                _extraArgumentsError = result.Error ?? "Could not save the extra options.";
+                _extraArgumentsError = result.Error ?? "Could not save the per-model settings.";
                 return false;
             }
 
             _extraArguments = text;
             _savedExtraArguments = text;
+            _alias = normalizedAlias;
+            _savedAlias = normalizedAlias;
             _extraArgumentsMessage = result.Warning ??
                 (Model.IsLoaded
                     ? "Saved. This model is running with its previous options; unload it from the list, then load it again."
                     : "Saved. Applies the next time this model loads.");
             OnPropertyChanged(nameof(ExtraArguments));
+            OnPropertyChanged(nameof(Alias));
             return true;
         }
         catch (Exception ex)
         {
             // The host is expected to return failures, not throw; keep the UI
             // usable if it does (e.g. an unexpected I/O exception).
-            _extraArgumentsError = "Could not save the extra options: " + ex.Message;
+            _extraArgumentsError = "Could not save the per-model settings: " + ex.Message;
             return false;
         }
         finally
@@ -414,7 +471,11 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         OnPropertyChanged(nameof(ExtraArgumentsSaveMessage));
         OnPropertyChanged(nameof(HasExtraArgumentsSaveMessage));
         OnPropertyChanged(nameof(HasUnsavedExtraArguments));
+        OnPropertyChanged(nameof(HasUnsavedAlias));
+        OnPropertyChanged(nameof(HasUnsavedOptions));
         OnPropertyChanged(nameof(HasConfiguredExtraArguments));
+        OnPropertyChanged(nameof(HasConfiguredAlias));
+        OnPropertyChanged(nameof(HasConfiguredOptions));
         OnPropertyChanged(nameof(RequiresUnloadConfirmation));
         OnPropertyChanged(nameof(ExtraArgumentsAppliesOnReload));
         OnPropertyChanged(nameof(ExtraArgumentsEnabled));
