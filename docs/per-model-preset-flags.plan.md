@@ -93,6 +93,7 @@ Assigned by `App.OnLaunched` from `Settings.Current.ModelExtraArguments`
 | `threads-batch` | `tb` | int 1–256 |
 | `flash-attn` | `fa` | `on` / `off` / `auto` |
 | `special` | `sp` | `true` / `false` (bare flag = true); keeps special/control tokens in output — some lightonai models require it |
+| `embeddings` | — | `true` / `false` (bare flag = true); enables `/v1/embeddings` for this model |
 | `alias` | `a` | one or more client-facing model names, comma-separated (max 128 chars each); requests may use these instead of the repo:quant id |
 | `batch-size` | `b` | int 1–8192 |
 | `ubatch-size` | `ub` | int 1–8192 |

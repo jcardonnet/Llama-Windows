@@ -155,6 +155,9 @@ public sealed class ModelPresetOptionsTests
     [InlineData("special = 1", "special", "true")]
     [InlineData("--special", "special", "true")]
     [InlineData("-sp", "special", "true")]
+    [InlineData("embeddings = true", "embeddings", "true")]
+    [InlineData("embeddings = off", "embeddings", "false")]
+    [InlineData("--embeddings", "embeddings", "true")]
     [InlineData("threads = 256", "threads", "256")]
     public void TypedValues_AreAcceptedAndCanonicalized(
         string text, string key, string value)

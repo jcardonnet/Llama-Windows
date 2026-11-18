@@ -83,6 +83,8 @@ public static class ModelPresetOptions
         new("flash-attn", ["fa"], ModelPresetValueKind.Enum, 0, 0, ["on", "off", "auto"]),
         new("special", ["sp"], ModelPresetValueKind.Boolean, 0, 0, ["true", "false"],
             "keeps special/control tokens in generated text (debugging)"),
+        new("embeddings", [], ModelPresetValueKind.Boolean, 0, 0, ["true", "false"],
+            "enables the /v1/embeddings endpoint for this model"),
         AliasSpec,
         new("batch-size", ["b"], ModelPresetValueKind.Integer, 1, 8192, []),
         new("ubatch-size", ["ub"], ModelPresetValueKind.Integer, 1, 8192, []),
